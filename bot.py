@@ -20,7 +20,7 @@ class QuizBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-        super().__init__(command_prefix=self.determine_prefix, intents=intents)
+        super().__init__(command_prefix=self.determine_prefix, intents=intents, help_command=None)
 
     async def setup_hook(self) -> None:
         await self.load_extension("cogs.questions")

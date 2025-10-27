@@ -4,7 +4,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import discord
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,6 +34,8 @@ class AnswerResult:
     explanation: Optional[str] = None
     solver_id: Optional[int] = None
     correct: bool = False
+    difficulty: Optional[str] = None
+    model_name: Optional[str] = None
 
 
 class QuestionCog(commands.Cog):
@@ -47,6 +49,7 @@ class QuestionCog(commands.Cog):
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
         self.active_questions: Dict[int, int] = {}  # channel_id -> question_id
         self.active_views: Dict[int, "AnswerButtons"] = {}
+        self.question_meta: Dict[int, Dict[str, str]] = {}
         self.publish_lock = asyncio.Lock()
 
     async def cog_load(self) -> None:
@@ -87,6 +90,7 @@ class QuestionCog(commands.Cog):
                 if question and (datetime.utcnow() - question.created_at).days < 1:
                     if db.get_first_correct_response(question.id):
                         continue
+                    self._get_question_metadata(question)
                     self.active_questions[channel.id] = question.id
 
     async def _dispatch_daily_questions(self) -> None:
@@ -110,6 +114,33 @@ class QuestionCog(commands.Cog):
         return None
 
     @staticmethod
+    @staticmethod
+    def _parse_prompt_metadata(prompt: str) -> Tuple[Dict[str, str], str]:
+        meta: Dict[str, str] = {}
+        remainder = prompt
+        while remainder.startswith("["):
+            end = remainder.find("]")
+            if end == -1:
+                break
+            segment = remainder[1:end]
+            if ':' in segment:
+                key, value = segment.split(':', 1)
+                meta[key.strip().lower()] = value.strip()
+            remainder = remainder[end + 1 :].lstrip()
+        return meta, remainder
+
+    def _get_question_metadata(self, question) -> Dict[str, str]:
+        stored = dict(self.question_meta.get(question.id, {}))
+        meta, cleaned = self._parse_prompt_metadata(question.prompt or "")
+        if cleaned != question.prompt:
+            question.prompt = cleaned
+        for key, value in meta.items():
+            if value:
+                stored[key] = value
+        self.question_meta[question.id] = stored
+        return stored
+
+    @staticmethod
     def _extract_options(question) -> Dict[str, str]:
         options = question.options or {}
         if isinstance(options, str):
@@ -131,6 +162,8 @@ class QuestionCog(commands.Cog):
             question = db.get_latest_question_for_channel(channel_id)
             if question:
                 self.active_questions[channel_id] = question.id
+        if question:
+            self._get_question_metadata(question)
         return question
 
     def _submit_answer(
@@ -155,6 +188,10 @@ class QuestionCog(commands.Cog):
         if not question or channel_id is None:
             return AnswerResult(status="no_question", question=None, choice=choice)
 
+        meta = self._get_question_metadata(question)
+        difficulty = meta.get("difficulty", "Unknown")
+        model_name = meta.get("model", "Unknown")
+
         active_question_id = self.active_questions.get(channel_id)
         if active_question_id and question.id != active_question_id:
             return AnswerResult(status="stale", question=question, choice=choice)
@@ -167,10 +204,12 @@ class QuestionCog(commands.Cog):
                 question=question,
                 choice=choice,
                 solver_id=first_correct.user_id,
+                difficulty=difficulty,
+                model_name=model_name,
             )
 
         if db.has_user_answered(question.id, user.id):
-            return AnswerResult(status="already_answered", question=question, choice=choice)
+            return AnswerResult(status="already_answered", question=question, choice=choice, difficulty=difficulty, model_name=model_name)
 
         options = self._extract_options(question)
         option_text = options.get(choice, "")
@@ -194,6 +233,8 @@ class QuestionCog(commands.Cog):
                 explanation=question.explanation,
                 solver_id=user.id,
                 correct=True,
+                difficulty=difficulty,
+                model_name=model_name,
             )
 
         return AnswerResult(
@@ -201,6 +242,8 @@ class QuestionCog(commands.Cog):
             question=question,
             choice=choice,
             option_text=option_text,
+            difficulty=difficulty,
+            model_name=model_name,
         )
 
     async def _disable_active_view(self, channel_id: int) -> None:
@@ -235,9 +278,13 @@ class QuestionCog(commands.Cog):
             color=discord.Color.from_rgb(28, 187, 140),
         )
         embed.add_field(name="Answer Text", value=option_text, inline=False)
+        if result.difficulty:
+            embed.add_field(name="Difficulty", value=result.difficulty, inline=True)
+        if result.model_name:
+            embed.add_field(name="Generated By", value=f"model {result.model_name}", inline=True)
         if result.explanation:
             embed.add_field(name="Explanation", value=result.explanation, inline=False)
-        embed.set_footer(text="Use /ans to see the full explanation privately.")
+        embed.set_footer(text="Ready for the next challenge? Click the button below!")
         return embed
 
     def _build_already_solved_embed(self, guild: discord.Guild, solver_id: Optional[int]) -> discord.Embed:
@@ -255,17 +302,25 @@ class QuestionCog(commands.Cog):
     async def publish_question(self, channel: discord.abc.Messageable, topic: Optional[str] = None) -> None:
         async with self.publish_lock:
             payload = self.client.generate_question(topic)
+            difficulty = payload.difficulty or "Medium"
+            model_name = payload.model_name or "Unknown"
+            db_prompt = f"[Difficulty: {difficulty}][Model: {model_name}] {payload.question}"
             question_record = db.record_question(
                 topic=payload.topic,
-                prompt=payload.question,
+                prompt=db_prompt,
                 options=payload.options,
                 correct_answer=payload.answer,
                 explanation=payload.explanation,
                 channel_id=getattr(channel, "id", None),
             )
 
-            embed = self._build_question_embed(payload)
-            intro = "**Daily CS Quiz** - tap a button below to answer. First correct reply wins 10 pts!"
+            self.question_meta[question_record.id] = {"difficulty": difficulty, "model": model_name}
+
+            embed = self._build_question_embed(payload, difficulty, model_name)
+            intro = (
+                "**Daily CS Quiz** - tap a button below to answer. First correct reply wins 10 pts!\n"
+                f"Generated by model {model_name}"
+            )
 
             channel_id = getattr(channel, "id", None)
             view = AnswerButtons(self, question_record.id, channel_id) if channel_id is not None else None
@@ -279,7 +334,12 @@ class QuestionCog(commands.Cog):
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
                 db.attach_message_id(question_record.id, message.id)
 
-    def _build_question_embed(self, payload: QuestionPayload) -> discord.Embed:
+    def _build_question_embed(
+        self,
+        payload: QuestionPayload,
+        difficulty: Optional[str],
+        model: Optional[str],
+    ) -> discord.Embed:
         embed = discord.Embed(
             title=payload.topic,
             description=f"**Question**\n{payload.question}",
@@ -287,6 +347,8 @@ class QuestionCog(commands.Cog):
             timestamp=datetime.utcnow(),
         )
         embed.set_author(name="Daily Computer Science Quiz")
+        embed.add_field(name="Difficulty", value=difficulty or "Unknown", inline=True)
+        embed.add_field(name="Generated By", value=f"model {model or 'Unknown'}", inline=True)
         for option_key in ("A", "B", "C", "D"):
             option_value = payload.options.get(option_key, "-")
             label = OPTION_LABELS.get(option_key, f"Option {option_key}")
@@ -298,7 +360,13 @@ class QuestionCog(commands.Cog):
         embed.set_footer(text="Tip: speed matters! Only the first correct answer scores.")
         return embed
 
-    def _build_answer_embed(self, question, guild: Optional[discord.Guild]) -> discord.Embed:
+    def _build_answer_embed(
+        self,
+        question,
+        guild: Optional[discord.Guild],
+        difficulty: Optional[str],
+        model: Optional[str],
+    ) -> discord.Embed:
         options = self._extract_options(question)
         correct_letter = (question.correct_answer or "A").upper()
         correct_text = options.get(correct_letter, "No option text recorded.")
@@ -314,6 +382,8 @@ class QuestionCog(commands.Cog):
             value=f"{label}\n{correct_text}",
             inline=False,
         )
+        embed.add_field(name="Difficulty", value=difficulty or "Unknown", inline=True)
+        embed.add_field(name="Generated By", value=f"model {model or 'Unknown'}", inline=True)
 
         if question.explanation:
             embed.add_field(name="Why?", value=question.explanation, inline=False)
@@ -348,7 +418,10 @@ class QuestionCog(commands.Cog):
         question = db.get_latest_question_for_channel(channel_id)
         if not question:
             return None
-        return self._build_answer_embed(question, guild)
+        meta = self._get_question_metadata(question)
+        difficulty = meta.get("difficulty", "Unknown")
+        model = meta.get("model", "Unknown")
+        return self._build_answer_embed(question, guild, difficulty, model)
 
     async def _handle_question_request(self, ctx: commands.Context, topic: Optional[str]) -> None:
         """Allow users to manually request a new question."""
@@ -361,10 +434,7 @@ class QuestionCog(commands.Cog):
             await interaction.response.defer(thinking=True)
 
         await self.publish_question(ctx.channel, topic)
-        if interaction and interaction.response.is_done():
-            await interaction.followup.send("New question posted! Good luck!", ephemeral=False)
-        else:
-            await ctx.reply("New question posted! Good luck!", mention_author=False)
+        # Silently post the question without extra confirmation messages
 
     @commands.hybrid_command(name="question", with_app_command=True, description="Request a new CS question.")
     async def question_command(self, ctx: commands.Context, *, topic: Optional[str] = None) -> None:
@@ -408,11 +478,42 @@ class AnswerButtons(discord.ui.View):
             button.callback = self._make_callback(letter)
             self.add_item(button)
 
+        # Add a 5th button to generate a new question
+        new_question_button = discord.ui.Button(
+            label="New Question",
+            style=discord.ButtonStyle.success,
+            emoji="🔄",
+            custom_id=f"quiz-new:{question_id}",
+        )
+        new_question_button.callback = self._new_question_callback
+        self.add_item(new_question_button)
+
     def _make_callback(self, letter: str):
         async def callback(interaction: discord.Interaction) -> None:
             await self._handle_answer(interaction, letter)
 
         return callback
+
+    async def _new_question_callback(self, interaction: discord.Interaction) -> None:
+        """Handle the 'New Question' button click."""
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This action is only available inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        # Disable all buttons on this question
+        self.disable_all_items()
+        await interaction.response.defer()
+
+        try:
+            await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+        # Generate and publish a new question
+        await self.cog.publish_question(interaction.channel)
 
     def disable_all_items(self) -> None:
         for child in self.children:
@@ -481,31 +582,56 @@ class AnswerButtons(discord.ui.View):
             return
 
         if status == "incorrect":
-            label_text = OPTION_LABELS.get(letter, f"Option {letter}")
-            await interaction.response.send_message(
-                f"Good luck next time {interaction.user.mention}! (You chose {label_text}.)",
-                ephemeral=True,
+            # Build an embed showing their wrong answer and the correct one
+            question = result.question
+            if not question:
+                await interaction.response.send_message(
+                    "Something unexpected happened. Try again in a moment.",
+                    ephemeral=True,
+                )
+                return
+
+            options = self.cog._extract_options(question)
+            correct_letter = (question.correct_answer or "A").upper()
+            correct_text = options.get(correct_letter, "No option text recorded.")
+            correct_label = OPTION_LABELS.get(correct_letter, f"Option {correct_letter}")
+
+            chosen_label = OPTION_LABELS.get(letter, f"Option {letter}")
+            chosen_text = options.get(letter, "")
+
+            incorrect_embed = discord.Embed(
+                title="Not Quite Right",
+                description=f"You chose **{chosen_label}**: {chosen_text}",
+                color=discord.Color.from_rgb(237, 66, 69),
             )
+            incorrect_embed.add_field(
+                name="Correct Answer",
+                value=f"**{correct_label}**: {correct_text}",
+                inline=False,
+            )
+
+            if result.difficulty:
+                incorrect_embed.add_field(name="Difficulty", value=result.difficulty, inline=True)
+            if result.model_name:
+                incorrect_embed.add_field(name="Generated By", value=f"model {result.model_name}", inline=True)
+
+            if question.explanation:
+                incorrect_embed.add_field(name="Explanation", value=question.explanation, inline=False)
+
+            incorrect_embed.set_footer(text="Keep practicing! Use /question to try another one.")
+
+            await interaction.response.send_message(embed=incorrect_embed, ephemeral=True)
             return
 
         if status == "correct":
-            option_text = result.option_text or "No option text recorded."
-            label_text = OPTION_LABELS.get(letter, f"Option {letter}")
-            private_embed = discord.Embed(
-                title="Correct!",
-                description=f"You chose {label_text} - that's right!",
-                color=discord.Color.from_rgb(28, 187, 140),
-            )
-            private_embed.add_field(name="Answer Text", value=option_text, inline=False)
-            if result.explanation:
-                private_embed.add_field(name="Explanation", value=result.explanation, inline=False)
-            private_embed.set_footer(text="Nice work! Grab a fresh quiz with /question.")
-
-            await interaction.response.send_message(embed=private_embed, ephemeral=True)
-
+            # Send only the public announcement with the Next Question button
             public_embed = self.cog._build_public_correct_embed(interaction.user, result)
+            next_question_view = NextQuestionButton(self.cog, interaction.user)
+
+            await interaction.response.defer()
+
             if public_embed:
-                await interaction.channel.send(embed=public_embed)
+                await interaction.channel.send(embed=public_embed, view=next_question_view)
 
             self.disable_all_items()
             try:
@@ -559,17 +685,34 @@ class AnswerButtons(discord.ui.View):
             await self._safe_react(message, "✅")
             await self._disable_active_view(channel_id)
             public_embed = self._build_public_correct_embed(message.author, result)
+            next_question_view = NextQuestionButton(self, message.author)
             if public_embed:
-                await message.channel.send(embed=public_embed)
+                await message.channel.send(embed=public_embed, view=next_question_view)
             return
         if status == "incorrect":
             await self._safe_react(message, "❌")
-            label_text = OPTION_LABELS.get(result.choice, f"Option {result.choice}")
-            await message.reply(
-                f"Good luck next time! You picked {label_text}.",
-                mention_author=False,
-                delete_after=6,
-            )
+            # Show the correct answer to help them learn
+            question = result.question
+            if question:
+                options = self._extract_options(question)
+                correct_letter = (question.correct_answer or "A").upper()
+                correct_text = options.get(correct_letter, "No option text recorded.")
+                correct_label = OPTION_LABELS.get(correct_letter, f"Option {correct_letter}")
+                chosen_label = OPTION_LABELS.get(result.choice, f"Option {result.choice}")
+
+                await message.reply(
+                    f"Not quite! You chose **{chosen_label}**, but the correct answer was **{correct_label}**: {correct_text}",
+                    mention_author=False,
+                    delete_after=10,
+                )
+            else:
+                difficulty_label = result.difficulty or "Unknown"
+                model_label = result.model_name or "Unknown"
+                await message.reply(
+                    f"Good luck next time! (Difficulty: {difficulty_label}, Model: {model_label})",
+                    mention_author=False,
+                    delete_after=6,
+                )
 
     @commands.hybrid_command(name="show_question", with_app_command=True, description="Re-post the active question.")
     async def show_question(self, ctx: commands.Context) -> None:
@@ -588,14 +731,19 @@ class AnswerButtons(discord.ui.View):
             await ctx.reply("Unable to load the question from storage.")
             return
 
+        meta = self._get_question_metadata(question)
+        difficulty = meta.get("difficulty", "Unknown")
+        model_name = meta.get("model", "Unknown")
         payload = QuestionPayload(
             topic=question.topic,
             question=question.prompt,
             options=question.options,
             answer=question.correct_answer,
             explanation=question.explanation,
+            difficulty=difficulty,
+            model_name=model_name,
         )
-        embed = self._build_question_embed(payload)
+        embed = self._build_question_embed(payload, difficulty, model_name)
         await ctx.reply("Here is the current question:", embed=embed)
 
     async def _safe_react(self, message: discord.Message, emoji: str) -> None:
@@ -603,6 +751,36 @@ class AnswerButtons(discord.ui.View):
             await message.add_reaction(emoji)
         except discord.HTTPException:
             LOGGER.debug("Failed to add reaction %s to message %s", emoji, message.id)
+
+
+class NextQuestionButton(discord.ui.View):
+    """A button that allows users to quickly generate the next question."""
+
+    def __init__(self, cog: "QuestionCog", requester: discord.Member) -> None:
+        super().__init__(timeout=300)  # 5 minutes timeout
+        self.cog = cog
+        self.requester = requester
+
+    @discord.ui.button(label="Next Question", style=discord.ButtonStyle.success, emoji="▶️")
+    async def next_question(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This action is only available inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        # Disable the button after it's clicked
+        button.disabled = True
+        await interaction.response.defer()
+
+        try:
+            await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+        # Generate and publish a new question
+        await self.cog.publish_question(interaction.channel)
 
 
 async def setup(bot: commands.Bot) -> None:

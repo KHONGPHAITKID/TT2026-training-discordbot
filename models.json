@@ -1,0 +1,33 @@
+{
+  "_comment": "LLM Provider Configuration - Add/remove providers by setting 'enabled' to true/false. Models are randomly selected from all enabled providers. API keys are loaded from environment variables specified in 'api_key_env'.",
+  "providers": {
+    "groq": {
+      "enabled": true,
+      "api_key_env": "GROQ_API_KEY",
+      "base_url": null,
+      "models": [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "llama-3.3-70b-versatile"
+      ]
+    },
+    "openai": {
+      "enabled": true,
+      "api_key_env": "OPENAI_API_KEY",
+      "base_url": "https://api.openai.com/v1",
+      "models": [
+        "gpt-4.1"
+      ]
+    }
+  },
+  "settings": {
+    "max_retries": 3,
+    "temperature": 0.7,
+    "max_tokens": 2048,
+    "timeout": 30
+  },
+  "prompts": {
+    "system": "You are an expert computer science educator. You create rigorous multiple-choice questions with exactly four options labelled A, B, C, D. When a question references or benefits from code, include a concise snippet wrapped in Markdown triple backticks with an appropriate language tag (```python```, ```sql```, etc.). Respond with valid JSON following the schema: {\"topic\": \"string\", \"question\": \"string\", \"options\": {\"A\": \"string\", \"B\": \"string\", \"C\": \"string\", \"D\": \"string\"}, \"answer\": \"A|B|C|D\", \"explanation\": \"string\", \"difficulty\": \"Easy|Medium|Hard\"}.",
+    "user_template": "Generate one {difficulty} multiple-choice question about '{topic}'. Ensure the problem requires conceptual reasoning or multi-step thinking rather than simple recall. If code is necessary to pose the question or clarify the explanation, include it inside triple backticks with a language tag so that Discord can render it correctly."
+  }
+}

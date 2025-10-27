@@ -1,0 +1,148 @@
+{
+  "_comment": "Computer Science quiz topics - Add, remove, or modify topics as needed. The bot will randomly select from this list when no specific topic is requested.",
+  "categories": {
+    "algorithms_and_data_structures": {
+      "display_name": "Algorithms & Data Structures",
+      "enabled": true,
+      "topics": [
+        "Algorithms & Data Structures",
+        "Big O Notation & Complexity Analysis",
+        "Sorting Algorithms",
+        "Graph Algorithms",
+        "Dynamic Programming",
+        "Recursion & Backtracking",
+        "Trees & Binary Search Trees"
+      ]
+    },
+    "programming": {
+      "display_name": "Programming Languages & Paradigms",
+      "enabled": true,
+      "topics": [
+        "Programming Languages",
+        "Object-Oriented Programming",
+        "Functional Programming",
+        "Python Programming",
+        "JavaScript & Web Development",
+        "Type Systems",
+        "Memory Management"
+      ]
+    },
+    "systems": {
+      "display_name": "Systems & Architecture",
+      "enabled": true,
+      "topics": [
+        "Operating Systems",
+        "Computer Architecture",
+        "Distributed Systems",
+        "System Design",
+        "Concurrency & Parallelism",
+        "Caching Strategies",
+        "Load Balancing"
+      ]
+    },
+    "networking": {
+      "display_name": "Networking & Security",
+      "enabled": true,
+      "topics": [
+        "Computer Networking",
+        "Network Protocols",
+        "Cybersecurity",
+        "Cryptography",
+        "Web Security",
+        "Authentication & Authorization"
+      ]
+    },
+    "databases": {
+      "display_name": "Databases & Storage",
+      "enabled": true,
+      "topics": [
+        "Databases & SQL",
+        "NoSQL Databases",
+        "Database Indexing",
+        "Transaction Management",
+        "Database Normalization",
+        "Data Modeling"
+      ]
+    },
+    "ai_and_ml": {
+      "display_name": "AI & Machine Learning",
+      "enabled": true,
+      "topics": [
+        "Machine Learning",
+        "Deep Learning",
+        "Neural Networks",
+        "Natural Language Processing",
+        "Computer Vision",
+        "Reinforcement Learning"
+      ]
+    },
+    "software_engineering": {
+      "display_name": "Software Engineering Practices",
+      "enabled": true,
+      "topics": [
+        "Software Engineering Practices",
+        "Software Design Patterns",
+        "Testing & Quality Assurance",
+        "DevOps & CI/CD",
+        "Version Control Systems",
+        "Agile & Scrum",
+        "Code Review Best Practices"
+      ]
+    },
+    "theory": {
+      "display_name": "Theory & Fundamentals",
+      "enabled": true,
+      "topics": [
+        "Theory of Computation",
+        "Formal Languages & Automata",
+        "Compiler Design",
+        "Regular Expressions"
+      ]
+    },
+    "data_engineering": {
+      "display_name": "Data Engineering & Analytics",
+      "enabled": true,
+      "topics": [
+        "Big Data & Data Engineering",
+        "Data Mining & Knowledge Discovery",
+        "ETL Processes",
+        "Data Warehousing",
+        "Stream Processing"
+      ]
+    },
+    "tools_and_platforms": {
+      "display_name": "Tools & Platforms",
+      "enabled": true,
+      "topics": [
+        "Bash & Shell Scripting",
+        "Linux System Fundamentals",
+        "Docker & Containerization",
+        "Kubernetes",
+        "Cloud Computing",
+        "Git & GitHub"
+      ]
+    },
+    "emerging": {
+      "display_name": "Emerging Technologies",
+      "enabled": true,
+      "topics": [
+        "Quantum Computing",
+        "Blockchain Technology",
+        "Edge Computing",
+        "WebAssembly",
+        "Microservices Architecture"
+      ]
+    },
+    "other": {
+      "display_name": "Other Topics",
+      "enabled": true,
+      "topics": [
+        "Computer Graphics",
+        "Game Development",
+        "Mobile Development",
+        "API Design",
+        "Project Management in Software Engineering"
+      ]
+    }
+  }
+}
