@@ -83,12 +83,15 @@ class GroqClient:
                             '"answer": "A|B|C|D", "explanation": "string"}.'
                         ),
                     },
-                    {
-                        "role": "user",
-                        "content": f"Create a single multiple-choice question about the topic '{chosen_topic}'.",
-                    },
-                ],
-            )
+                {
+                    "role": "user",
+                    "content": (
+                        f"Create one medium-to-hard difficulty multiple-choice question about '{chosen_topic}'. "
+                        "Ensure the problem requires conceptual reasoning or multi-step thinking rather than simple recall."
+                    ),
+                },
+            ],
+        )
         except Exception as exc:  # pragma: no cover - network/API failure
             LOGGER.exception("Groq API request failed, using fallback question.", exc_info=exc)
             return self._fallback_question(chosen_topic)

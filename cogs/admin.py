@@ -52,20 +52,6 @@ class AdminCog(commands.Cog):
         db.update_guild_config(ctx.guild.id, admin_role_id=role.id)
         await ctx.reply(f"{role.mention} can now manage the quiz bot.")
 
-    @commands.hybrid_command(name="question", with_app_command=True, description="Force post a new question now.")
-    @is_admin()
-    async def question(self, ctx: commands.Context, *, topic: Optional[str] = None) -> None:
-        question_cog = self.bot.get_cog("QuestionCog")
-        if not question_cog:
-            await ctx.reply("Question system is not ready. Try again later.")
-            return
-
-        interaction = getattr(ctx, "interaction", None)
-        if interaction and not interaction.response.is_done():
-            await interaction.response.defer(thinking=True)
-
-        await question_cog.publish_question(ctx.channel, topic)
-
 
     @commands.hybrid_command(name="reset_scores", with_app_command=True, description="Reset all quiz scores.")
     @is_admin()

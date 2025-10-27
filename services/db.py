@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    func,
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import declarative_base, relationship, scoped_session, sessionmaker
@@ -381,3 +382,120 @@ def update_guild_config(guild_id: int, **kwargs) -> GuildConfig:
         session.flush()
         session.expunge(config)
         return config
+
+
+def get_user_answer_stats(user_id: int) -> Dict[str, object]:
+    """Return rich statistics for a user's quiz history."""
+    with get_session() as session:
+        total_answers = (
+            session.query(func.count(Response.id)).filter(Response.user_id == user_id).scalar() or 0
+        )
+        correct_answers = (
+            session.query(func.count(Response.id))
+            .filter(Response.user_id == user_id, Response.is_correct == 1)
+            .scalar()
+            or 0
+        )
+        incorrect_answers = total_answers - correct_answers
+        accuracy = (correct_answers / total_answers) if total_answers else 0.0
+
+        topic_rows = (
+            session.query(
+                Question.topic.label("topic"),
+                func.count(Response.id).label("attempts"),
+                func.coalesce(func.sum(Response.is_correct), 0).label("correct"),
+            )
+            .join(Question, Question.id == Response.question_id)
+            .filter(Response.user_id == user_id)
+            .group_by(Question.topic)
+            .order_by(func.count(Response.id).desc())
+            .all()
+        )
+
+        per_topic = []
+        for row in topic_rows:
+            attempts = row.attempts or 0
+            correct = row.correct or 0
+            per_topic.append(
+                {
+                    "topic": row.topic,
+                    "attempts": attempts,
+                    "correct": correct,
+                    "accuracy": (correct / attempts) if attempts else 0.0,
+                }
+            )
+
+        return {
+            "total_answers": total_answers,
+            "correct_answers": correct_answers,
+            "incorrect_answers": incorrect_answers,
+            "accuracy": accuracy,
+            "topics": per_topic,
+        }
+
+
+def get_top_topic_performers(limit_per_topic: int = 1) -> Dict[str, list]:
+    """Return per-topic top performers based on correct answers."""
+    with get_session() as session:
+        rows = (
+            session.query(
+                Question.topic.label("topic"),
+                Response.user_id.label("user_id"),
+                func.coalesce(func.sum(Response.is_correct), 0).label("correct"),
+                func.count(Response.id).label("attempts"),
+            )
+            .join(Question, Question.id == Response.question_id)
+            .group_by(Question.topic, Response.user_id)
+            .having(func.coalesce(func.sum(Response.is_correct), 0) > 0)
+            .all()
+        )
+
+        grouped: Dict[str, list] = {}
+        for row in rows:
+            grouped.setdefault(row.topic, []).append(
+                {
+                    "user_id": row.user_id,
+                    "correct": int(row.correct or 0),
+                    "attempts": int(row.attempts or 0),
+                    "accuracy": (row.correct / row.attempts) if row.attempts else 0.0,
+                }
+            )
+
+        # sort within each topic by correct answers (desc) then accuracy
+        for topic, entries in grouped.items():
+            entries.sort(key=lambda item: (item["correct"], item["accuracy"]), reverse=True)
+            grouped[topic] = entries[:limit_per_topic]
+
+        return grouped
+
+
+def get_high_accuracy_players(limit: int = 5, min_answers: int = 5) -> List[Dict[str, object]]:
+    """Return players with the best accuracy given a minimum number of attempts."""
+    with get_session() as session:
+        rows = (
+            session.query(
+                Response.user_id.label("user_id"),
+                func.count(Response.id).label("attempts"),
+                func.coalesce(func.sum(Response.is_correct), 0).label("correct"),
+            )
+            .group_by(Response.user_id)
+            .having(func.count(Response.id) >= min_answers)
+            .all()
+        )
+
+        results: List[Dict[str, object]] = []
+        for row in rows:
+            attempts = int(row.attempts or 0)
+            correct = int(row.correct or 0)
+            accuracy = (correct / attempts) if attempts else 0.0
+            results.append(
+                {
+                    "user_id": row.user_id,
+                    "attempts": attempts,
+                    "correct": correct,
+                    "accuracy": accuracy,
+                }
+            )
+
+        results.sort(key=lambda item: (item["accuracy"], item["correct"]), reverse=True)
+        return results[:limit]
