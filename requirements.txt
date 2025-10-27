@@ -1,0 +1,7 @@
+discord.py>=2.3.2
+apscheduler>=3.10.4
+SQLAlchemy>=2.0.20
+python-dotenv>=1.0.1
+requests>=2.31.0
+matplotlib>=3.8.0
+groq
