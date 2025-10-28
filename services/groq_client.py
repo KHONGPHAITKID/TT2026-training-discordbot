@@ -256,7 +256,7 @@ class GroqClient:
         # Weighted random selection: 50% Easy, 30% Medium, 20% Hard
         target_difficulty = random.choices(
             ["Easy", "Medium", "Hard"],
-            weights=[50, 30, 20],
+            weights=[30, 50, 20],
             k=1
         )[0]
 
