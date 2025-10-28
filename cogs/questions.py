@@ -156,6 +156,44 @@ class QuestionCog(commands.Cog):
             normalised[str(key).upper()] = str(value)
         return normalised
 
+    @staticmethod
+    def _split_text_into_chunks(text: str, max_length: int) -> list:
+        """Split text into chunks at word boundaries, respecting max_length."""
+        if len(text) <= max_length:
+            return [text]
+
+        chunks = []
+        current_chunk = ""
+
+        # Split by paragraphs first (double newline)
+        paragraphs = text.split("\n\n")
+
+        for para in paragraphs:
+            # If paragraph itself is too long, split by sentences
+            if len(para) > max_length:
+                sentences = para.replace(". ", ".|").replace(".\n", ".\n|").split("|")
+                for sentence in sentences:
+                    if len(current_chunk) + len(sentence) + 2 <= max_length:
+                        current_chunk += sentence
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                        current_chunk = sentence
+            else:
+                # Try to add whole paragraph
+                if len(current_chunk) + len(para) + 2 <= max_length:
+                    current_chunk += ("\n\n" if current_chunk else "") + para
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = para
+
+        # Add any remaining text
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+
+        return chunks
+
     def _resolve_question_for_channel(self, channel_id: int) -> Optional[Any]:
         question_id = self.active_questions.get(channel_id)
         question = None
@@ -282,7 +320,14 @@ class QuestionCog(commands.Cog):
             description=f"{member.mention} chose **{label}** and earned **+10 points**!",
             color=discord.Color.from_rgb(28, 187, 140),
         )
-        embed.add_field(name="Answer Text", value=option_text, inline=False)
+        # Split long option texts if needed
+        if len(option_text) <= 1024:
+            embed.add_field(name="Answer Text", value=option_text, inline=False)
+        else:
+            chunks = self._split_text_into_chunks(option_text, 1024)
+            for idx, chunk in enumerate(chunks):
+                field_name = "Answer Text" if idx == 0 else "Answer Text (continued)"
+                embed.add_field(name=field_name, value=chunk, inline=False)
         if result.difficulty:
             embed.add_field(name="Difficulty", value=result.difficulty, inline=True)
         if result.model_name:
@@ -290,7 +335,15 @@ class QuestionCog(commands.Cog):
         if result.explanation:
             # Replace literal \n with actual newlines
             explanation = result.explanation.replace("\\n", "\n")
-            embed.add_field(name="Explanation", value=explanation, inline=False)
+            # Split long explanations across multiple fields (max 1024 chars per field)
+            if len(explanation) <= 1024:
+                embed.add_field(name="Explanation", value=explanation, inline=False)
+            else:
+                # Split into chunks at word boundaries
+                chunks = self._split_text_into_chunks(explanation, 1024)
+                for idx, chunk in enumerate(chunks):
+                    field_name = "Explanation" if idx == 0 else "Explanation (continued)"
+                    embed.add_field(name=field_name, value=chunk, inline=False)
         embed.set_footer(text="Ready for the next challenge? Click the button below!")
         return embed
 
@@ -360,6 +413,10 @@ class QuestionCog(commands.Cog):
         # Replace literal \n with actual newlines
         question_text = payload.question.replace("\\n", "\n")
 
+        # Truncate question if it exceeds Discord's 4096 char description limit
+        if len(question_text) > 4000:
+            question_text = question_text[:3997] + "..."
+
         embed = discord.Embed(
             title=payload.topic,
             description=f"**Question**\n{question_text}",
@@ -367,17 +424,24 @@ class QuestionCog(commands.Cog):
             timestamp=datetime.utcnow(),
         )
         embed.set_author(name="Daily Computer Science Quiz")
+
+        # Add options as fields, splitting if they exceed 1024 chars
         for option_key in ("A", "B", "C", "D"):
             option_value = payload.options.get(option_key, "-")
             # Replace literal \n with actual newlines in options too
             option_value = option_value.replace("\\n", "\n")
             label = OPTION_LABELS.get(option_key, f"Option {option_key}")
-            embed.add_field(
-                name=label,
-                value=option_value,
-                inline=False,
-            )
-        embed.set_footer(text="Tip: speed matters! Only the first correct answer scores.")
+
+            # Split long options into multiple fields if needed
+            if len(option_value) <= 1024:
+                embed.add_field(name=label, value=option_value, inline=False)
+            else:
+                # Split into chunks
+                chunks = self._split_text_into_chunks(option_value, 1024)
+                for idx, chunk in enumerate(chunks):
+                    field_name = label if idx == 0 else f"{label} (continued)"
+                    embed.add_field(name=field_name, value=chunk, inline=False)
+
         return embed
 
     def _build_answer_embed(
@@ -399,18 +463,34 @@ class QuestionCog(commands.Cog):
             color=discord.Color.from_rgb(28, 187, 140),
             timestamp=datetime.utcnow(),
         )
-        embed.add_field(
-            name="Correct Answer",
-            value=f"{label}\n{correct_text}",
-            inline=False,
-        )
+
+        # Check if correct answer text is too long
+        correct_answer_value = f"{label}\n{correct_text}"
+        if len(correct_answer_value) <= 1024:
+            embed.add_field(name="Correct Answer", value=correct_answer_value, inline=False)
+        else:
+            # Split into chunks if too long
+            chunks = self._split_text_into_chunks(correct_text, 1000)  # Leave room for label
+            for idx, chunk in enumerate(chunks):
+                field_name = "Correct Answer" if idx == 0 else "Correct Answer (continued)"
+                field_value = f"{label}\n{chunk}" if idx == 0 else chunk
+                embed.add_field(name=field_name, value=field_value, inline=False)
+
         embed.add_field(name="Difficulty", value=difficulty or "Unknown", inline=True)
         embed.add_field(name="Generated By", value=f"model {model or 'Unknown'}", inline=True)
 
         if question.explanation:
             # Replace literal \n with actual newlines in explanation too
             explanation = question.explanation.replace("\\n", "\n")
-            embed.add_field(name="Why?", value=explanation, inline=False)
+            # Split long explanations across multiple fields (max 1024 chars per field)
+            if len(explanation) <= 1024:
+                embed.add_field(name="Why?", value=explanation, inline=False)
+            else:
+                # Split into chunks at word boundaries
+                chunks = self._split_text_into_chunks(explanation, 1024)
+                for idx, chunk in enumerate(chunks):
+                    field_name = "Why?" if idx == 0 else "Why? (continued)"
+                    embed.add_field(name=field_name, value=chunk, inline=False)
 
         # Present options two per row for readability
         for option_key in ("A", "B", "C", "D"):
@@ -418,6 +498,11 @@ class QuestionCog(commands.Cog):
             # Replace literal \n with actual newlines
             option_value = option_value.replace("\\n", "\n")
             field_label = OPTION_LABELS.get(option_key, f"Option {option_key}")
+
+            # Truncate long options to fit field limit (1024 chars)
+            if len(option_value) > 1024:
+                option_value = option_value[:1020] + "..."
+
             embed.add_field(
                 name=field_label,
                 value=option_value,
@@ -644,16 +729,33 @@ class AnswerButtons(discord.ui.View):
             # Replace literal \n with actual newlines
             chosen_text = chosen_text.replace("\\n", "\n")
 
+            # Truncate chosen text if it would exceed description limit (4096 chars)
+            description_prefix = f"You chose **{chosen_label}**: "
+            max_chosen_length = 4000 - len(description_prefix)
+            if len(chosen_text) > max_chosen_length:
+                chosen_text = chosen_text[:max_chosen_length - 3] + "..."
+
             incorrect_embed = discord.Embed(
                 title="Not Quite Right",
                 description=f"You chose **{chosen_label}**: {chosen_text}",
                 color=discord.Color.from_rgb(237, 66, 69),
             )
-            incorrect_embed.add_field(
-                name="Correct Answer",
-                value=f"**{correct_label}**: {correct_text}",
-                inline=False,
-            )
+
+            # Split correct answer if it's too long for a field
+            correct_answer_value = f"**{correct_label}**: {correct_text}"
+            if len(correct_answer_value) <= 1024:
+                incorrect_embed.add_field(
+                    name="Correct Answer",
+                    value=correct_answer_value,
+                    inline=False,
+                )
+            else:
+                # Split into chunks
+                chunks = self.cog._split_text_into_chunks(correct_text, 1000)  # Leave room for label
+                for idx, chunk in enumerate(chunks):
+                    field_name = "Correct Answer" if idx == 0 else "Correct Answer (continued)"
+                    field_value = f"**{correct_label}**: {chunk}" if idx == 0 else chunk
+                    incorrect_embed.add_field(name=field_name, value=field_value, inline=False)
 
             if result.difficulty:
                 incorrect_embed.add_field(name="Difficulty", value=result.difficulty, inline=True)
@@ -663,7 +765,15 @@ class AnswerButtons(discord.ui.View):
             if question.explanation:
                 # Replace literal \n with actual newlines
                 explanation = question.explanation.replace("\\n", "\n")
-                incorrect_embed.add_field(name="Explanation", value=explanation, inline=False)
+                # Split long explanations across multiple fields (max 1024 chars per field)
+                if len(explanation) <= 1024:
+                    incorrect_embed.add_field(name="Explanation", value=explanation, inline=False)
+                else:
+                    # Split into chunks at word boundaries
+                    chunks = self._split_text_into_chunks(explanation, 1024)
+                    for idx, chunk in enumerate(chunks):
+                        field_name = "Explanation" if idx == 0 else "Explanation (continued)"
+                        incorrect_embed.add_field(name=field_name, value=chunk, inline=False)
 
             incorrect_embed.set_footer(text="Keep practicing! Use /question to try another one.")
 

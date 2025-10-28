@@ -370,54 +370,143 @@ class StatsCog(commands.Cog):
             for entry in specialists_raw
         ]
 
-        embed = self._build_leaderboard_embed(target, leaderboard, accuracy_leaders, specialists)
+        # Build separate embeds for each category
+        embeds = self._build_leaderboard_embeds(target, leaderboard, accuracy_leaders, specialists)
         charts = self._render_global_charts(leaderboard, accuracy_leaders, specialists)
 
-        files: List[discord.File] = []
-        if charts.leaderboard_chart and charts.leaderboard_chart.exists():
-            files.append(discord.File(charts.leaderboard_chart, filename="leaderboard.png"))
-            embed.set_thumbnail(url="attachment://leaderboard.png")
-        if charts.accuracy_chart and charts.accuracy_chart.exists():
-            files.append(discord.File(charts.accuracy_chart, filename="accuracy.png"))
-        if charts.topic_chart and charts.topic_chart.exists():
-            files.append(discord.File(charts.topic_chart, filename="specialists.png"))
+        # Send embeds sequentially
+        for idx, embed in enumerate(embeds):
+            files: List[discord.File] = []
 
-        await self._reply(target, embed=embed, files=files or None, ephemeral=ephemeral)
+            # Attach chart to first leaderboard embed
+            if idx == 0 and "Top Players" in embed.title:
+                if charts.leaderboard_chart and charts.leaderboard_chart.exists():
+                    files.append(discord.File(charts.leaderboard_chart, filename="leaderboard.png"))
+                    embed.set_thumbnail(url="attachment://leaderboard.png")
 
-    def _build_leaderboard_embed(
+            # Attach accuracy chart to accuracy leaders embed
+            if "Accuracy Leaders" in embed.title:
+                if charts.accuracy_chart and charts.accuracy_chart.exists():
+                    files.append(discord.File(charts.accuracy_chart, filename="accuracy.png"))
+                    embed.set_thumbnail(url="attachment://accuracy.png")
+
+            # Attach specialists chart to specialists embed
+            if "Topic Specialists" in embed.title:
+                if charts.topic_chart and charts.topic_chart.exists():
+                    files.append(discord.File(charts.topic_chart, filename="specialists.png"))
+                    embed.set_thumbnail(url="attachment://specialists.png")
+
+            # Send the embed
+            if idx == 0:
+                # First message uses _reply
+                await self._reply(target, embed=embed, files=files or None, ephemeral=ephemeral)
+            else:
+                # Subsequent messages use followup or direct send
+                if isinstance(target, discord.Interaction):
+                    await target.followup.send(embed=embed, files=files or None, ephemeral=ephemeral)
+                else:
+                    await target.send(embed=embed, files=files or None)
+
+    def _build_leaderboard_embeds(
         self,
         target: ContextLike,
         leaderboard: List[dict],
         accuracy_leaders: List[dict],
         specialists: List[dict],
-    ) -> discord.Embed:
+    ) -> List[discord.Embed]:
+        """Build multiple embeds for leaderboard data to avoid Discord's 1024 char limit."""
         requester = self._extract_member(target)
-        embed = discord.Embed(title="Global Standings", color=discord.Color.gold())
+        embeds = []
+
+        # Embed 1: Top Players
+        embed1 = discord.Embed(
+            title="🏆 Global Leaderboard - Top Players",
+            color=discord.Color.gold(),
+        )
         leaderboard_lines = [
-            f"{index}. **{row['name']}** - {row['score']} pts "
-            f"(correct {row['correct']} / wrong {row['wrong']})"
+            f"{index}. **{row['name']}** - {row['score']} pts (✅ {row['correct']} / ❌ {row['wrong']})"
             for index, row in enumerate(leaderboard, start=1)
         ]
-        embed.add_field(name="Top Players", value="\n".join(leaderboard_lines), inline=False)
+        leaderboard_text = "\n".join(leaderboard_lines) if leaderboard_lines else "No data yet"
 
+        # Split into multiple embeds if description exceeds 4096 chars (Discord limit)
+        if len(leaderboard_text) > 4000:
+            # Split leaderboard into chunks
+            current_chunk = []
+            current_length = 0
+            chunk_num = 1
+
+            for line in leaderboard_lines:
+                if current_length + len(line) + 1 > 4000:
+                    # Create embed for current chunk
+                    chunk_embed = discord.Embed(
+                        title=f"🏆 Global Leaderboard - Top Players (Part {chunk_num})",
+                        color=discord.Color.gold(),
+                    )
+                    chunk_embed.description = "\n".join(current_chunk)
+                    if requester:
+                        chunk_embed.set_footer(text=f"Requested by {requester.display_name}")
+                    embeds.append(chunk_embed)
+
+                    # Reset for next chunk
+                    current_chunk = [line]
+                    current_length = len(line)
+                    chunk_num += 1
+                else:
+                    current_chunk.append(line)
+                    current_length += len(line) + 1
+
+            # Add remaining lines
+            if current_chunk:
+                chunk_embed = discord.Embed(
+                    title=f"🏆 Global Leaderboard - Top Players (Part {chunk_num})" if chunk_num > 1 else "🏆 Global Leaderboard - Top Players",
+                    color=discord.Color.gold(),
+                )
+                chunk_embed.description = "\n".join(current_chunk)
+                if requester:
+                    chunk_embed.set_footer(text=f"Requested by {requester.display_name}")
+                embeds.append(chunk_embed)
+        else:
+            embed1.description = leaderboard_text
+            if requester:
+                embed1.set_footer(text=f"Requested by {requester.display_name}")
+            embeds.append(embed1)
+
+        # Embed 2: Accuracy Leaders
         if accuracy_leaders:
+            embed2 = discord.Embed(
+                title="🎯 Accuracy Leaders",
+                description="Top players by answer accuracy (minimum 5 answers)",
+                color=discord.Color.blue(),
+            )
             accuracy_lines = [
-                f"{idx + 1}. **{entry['user_label']}** - {entry['accuracy'] * 100:.1f}% "
-                f"({entry['correct']}/{entry['attempts']} correct)"
+                f"{idx + 1}. **{entry['user_label']}** - {entry['accuracy'] * 100:.1f}% ({entry['correct']}/{entry['attempts']} correct)"
                 for idx, entry in enumerate(accuracy_leaders)
             ]
-            embed.add_field(name="Accuracy Leaders", value="\n".join(accuracy_lines), inline=False)
+            accuracy_text = "\n".join(accuracy_lines) if accuracy_lines else "No data yet"
+            embed2.add_field(name="Rankings", value=accuracy_text, inline=False)
+            if requester:
+                embed2.set_footer(text=f"Requested by {requester.display_name}")
+            embeds.append(embed2)
 
+        # Embed 3: Topic Specialists
         if specialists:
+            embed3 = discord.Embed(
+                title="📚 Topic Specialists",
+                description="Top performers by topic",
+                color=discord.Color.purple(),
+            )
             specialist_lines = [
-                f"{entry['topic']}: **{entry['user_label']}** ({entry['correct']} correct)"
+                f"**{entry['topic']}**: {entry['user_label']} ({entry['correct']} correct)"
                 for entry in specialists
             ]
-            embed.add_field(name="Topic Specialists", value="\n".join(specialist_lines), inline=False)
+            specialist_text = "\n".join(specialist_lines) if specialist_lines else "No data yet"
+            embed3.add_field(name="Specialists", value=specialist_text, inline=False)
+            if requester:
+                embed3.set_footer(text=f"Requested by {requester.display_name}")
+            embeds.append(embed3)
 
-        if requester:
-            embed.set_footer(text=f"Requested by {requester.display_name}")
-        return embed
+        return embeds
 
     def _render_global_charts(
         self,
