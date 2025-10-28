@@ -629,16 +629,33 @@ class AnswerButtons(discord.ui.View):
             )
             return
 
-        # Disable all buttons on this question
-        self.disable_all_items()
+        # Check global cooldown
+        current_time = time.time()
+        time_elapsed = current_time - self.cog.last_question_time
+
+        if time_elapsed < QUESTION_COOLDOWN_SECONDS:
+            remaining = QUESTION_COOLDOWN_SECONDS - time_elapsed
+            await interaction.response.send_message(
+                f"⏱️ A question was just generated! Please wait {remaining:.1f} more seconds before generating another.",
+                ephemeral=True,
+            )
+            return
+
+        # Disable ONLY the "New Question" button (keep A/B/C/D active)
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.label == "New Question":
+                child.disabled = True
+                break
+
         await interaction.response.defer()
 
+        # Update the message to show the disabled "New Question" button
         try:
             await interaction.message.edit(view=self)
         except discord.HTTPException:
             pass
 
-        # Generate and publish a new question
+        # Generate and publish a new question (old question's A/B/C/D stay active)
         await self.cog.publish_question(interaction.channel)
 
     def disable_all_items(self) -> None:
