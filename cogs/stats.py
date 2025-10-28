@@ -81,6 +81,8 @@ class StatsCog(commands.Cog):
             snippet = clean_prompt[:150].rstrip()
             if len(clean_prompt) > 150:
                 snippet += "..."
+            # Replace literal \n with actual newlines
+            snippet = snippet.replace("\\n", "\n")
 
             # Build field value with nice formatting
             field_value = (

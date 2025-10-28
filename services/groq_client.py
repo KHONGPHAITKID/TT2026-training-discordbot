@@ -253,7 +253,12 @@ class GroqClient:
         Retry logic: Attempts up to max_retries (default 3) different models before falling back.
         """
         chosen_topic = topic or random.choice(self.available_topics)
-        target_difficulty = random.choice(["Easy", "Medium", "Hard"])
+        # Weighted random selection: 50% Easy, 30% Medium, 20% Hard
+        target_difficulty = random.choices(
+            ["Easy", "Medium", "Hard"],
+            weights=[50, 30, 20],
+            k=1
+        )[0]
 
         if not self._clients:
             LOGGER.warning("No LLM clients available; using local fallback question.")
