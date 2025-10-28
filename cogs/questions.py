@@ -233,10 +233,7 @@ class QuestionCog(commands.Cog):
         difficulty = meta.get("difficulty", "Unknown")
         model_name = meta.get("model", "Unknown")
 
-        active_question_id = self.active_questions.get(channel_id)
-        if active_question_id and question.id != active_question_id:
-            return AnswerResult(status="stale", question=question, choice=choice)
-
+        # Check if question has already been solved by anyone
         first_correct = db.get_first_correct_response(question.id)
         if first_correct:
             self.active_questions.pop(channel_id, None)
@@ -676,19 +673,6 @@ class AnswerButtons(discord.ui.View):
             )
             return
 
-        if status == "stale":
-            self.disable_all_items()
-            await interaction.response.send_message(
-                "This question has expired. Look for the latest quiz above!",
-                ephemeral=True,
-            )
-            try:
-                await interaction.message.edit(view=self)
-            except discord.HTTPException:
-                pass
-            self._pop_if_current()
-            return
-
         if status == "already_solved":
             self.disable_all_items()
             solver_embed = self.cog._build_already_solved_embed(interaction.guild, result.solver_id)
@@ -821,13 +805,6 @@ class AnswerButtons(discord.ui.View):
 
         status = result.status
         if status == "no_question":
-            return
-        if status == "stale":
-            await message.reply(
-                "That question has already expired. Check the latest prompt above!",
-                mention_author=False,
-                delete_after=6,
-            )
             return
         if status == "already_solved":
             await self._safe_react(message, "⛔")
