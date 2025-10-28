@@ -14,19 +14,6 @@
         "Trees & Binary Search Trees"
       ]
     },
-    "programming": {
-      "display_name": "Programming Languages & Paradigms",
-      "enabled": true,
-      "topics": [
-        "Programming Languages",
-        "Object-Oriented Programming",
-        "Functional Programming",
-        "Python Programming",
-        "JavaScript & Web Development",
-        "Type Systems",
-        "Memory Management"
-      ]
-    },
     "systems": {
       "display_name": "Systems & Architecture",
       "enabled": true,
@@ -82,11 +69,8 @@
       "topics": [
         "Software Engineering Practices",
         "Software Design Patterns",
-        "Testing & Quality Assurance",
         "DevOps & CI/CD",
-        "Version Control Systems",
-        "Agile & Scrum",
-        "Code Review Best Practices"
+        "Version Control Systems"
       ]
     },
     "theory": {
@@ -95,7 +79,6 @@
       "topics": [
         "Theory of Computation",
         "Formal Languages & Automata",
-        "Compiler Design",
         "Regular Expressions"
       ]
     },
@@ -131,17 +114,6 @@
         "Edge Computing",
         "WebAssembly",
         "Microservices Architecture"
-      ]
-    },
-    "other": {
-      "display_name": "Other Topics",
-      "enabled": true,
-      "topics": [
-        "Computer Graphics",
-        "Game Development",
-        "Mobile Development",
-        "API Design",
-        "Project Management in Software Engineering"
       ]
     }
   }
