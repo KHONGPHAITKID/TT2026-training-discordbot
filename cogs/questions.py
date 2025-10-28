@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover
 LOGGER = logging.getLogger(__name__)
 
 OPTION_LABELS = {"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"}
-QUESTION_COOLDOWN_SECONDS = 7  # Cooldown between question generations
+QUESTION_COOLDOWN_SECONDS = 5  # Global cooldown between question generations (applies bot-wide)
 
 
 @dataclass
@@ -50,10 +50,10 @@ class QuestionCog(commands.Cog):
         self.timezone = self._safe_timezone(tz_name)
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
         self.active_questions: Dict[int, int] = {}  # channel_id -> question_id
-        self.active_views: Dict[int, "AnswerButtons"] = {}
+        self.active_views: Dict[int, "AnswerButtons"] = {}  # question_id -> view (changed from channel_id)
         self.question_meta: Dict[int, Dict[str, str]] = {}
         self.publish_lock = asyncio.Lock()
-        self.last_question_time: Dict[int, float] = {}  # channel_id -> timestamp
+        self.last_question_time: float = 0.0  # Global timestamp for rate limiting (changed from per-channel)
 
     async def cog_load(self) -> None:
         self.scheduler.start()
@@ -284,13 +284,17 @@ class QuestionCog(commands.Cog):
             model_name=model_name,
         )
 
-    async def _disable_active_view(self, channel_id: int) -> None:
-        view = self.active_views.pop(channel_id, None)
+    async def _disable_active_view(self, question_id: int) -> None:
+        """Disable the answer buttons for a specific question."""
+        view = self.active_views.pop(question_id, None)
         if not view:
             return
         view.disable_all_items()
         message_id = getattr(view, "message_id", None)
         if message_id is None:
+            return
+        channel_id = getattr(view, "channel_id", None)
+        if channel_id is None:
             return
         channel = self.bot.get_channel(channel_id)
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
@@ -393,11 +397,12 @@ class QuestionCog(commands.Cog):
 
             if channel_id is not None:
                 self.active_questions[channel_id] = question_record.id
-                # Record timestamp for cooldown tracking
-                self.last_question_time[channel_id] = time.time()
+                # Record global timestamp for rate limiting
+                self.last_question_time = time.time()
                 if view:
                     view.message_id = message.id
-                    self.active_views[channel_id] = view
+                    # Store view by question_id so multiple questions can coexist
+                    self.active_views[question_record.id] = view
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
                 db.attach_message_id(question_record.id, message.id)
 
@@ -537,16 +542,14 @@ class QuestionCog(commands.Cog):
             await ctx.reply("This command is only available in servers.")
             return
 
-        # Check cooldown
-        channel_id = ctx.channel.id
+        # Check global cooldown
         current_time = time.time()
-        last_time = self.last_question_time.get(channel_id, 0)
-        time_elapsed = current_time - last_time
+        time_elapsed = current_time - self.last_question_time
 
         if time_elapsed < QUESTION_COOLDOWN_SECONDS:
             remaining = QUESTION_COOLDOWN_SECONDS - time_elapsed
             await ctx.reply(
-                f"⏱️ Slow down! Please wait {remaining:.1f} more seconds before generating the next question.",
+                f"⏱️ A question was just generated! Please wait {remaining:.1f} more seconds before generating another.",
                 ephemeral=True,
                 delete_after=5
             )
@@ -644,11 +647,12 @@ class AnswerButtons(discord.ui.View):
                 child.disabled = True
 
     def _pop_if_current(self) -> None:
-        if self.channel_id is None:
+        """Remove this view from tracking if it's still tracked."""
+        if self.question_id is None:
             return
-        current = self.cog.active_views.get(self.channel_id)
+        current = self.cog.active_views.get(self.question_id)
         if current is self:
-            self.cog.active_views.pop(self.channel_id, None)
+            self.cog.active_views.pop(self.question_id, None)
 
     async def _handle_answer(self, interaction: discord.Interaction, letter: str) -> None:
         if self.channel_id is None or not interaction.guild or not isinstance(interaction.user, discord.Member):
@@ -809,7 +813,7 @@ class AnswerButtons(discord.ui.View):
         if status == "already_solved":
             await self._safe_react(message, "⛔")
             await message.channel.send(embed=self._build_already_solved_embed(message.guild, result.solver_id))
-            await self._disable_active_view(channel_id)
+            await self._disable_active_view(result.question.id)
             return
         if status == "already_answered":
             await self._safe_react(message, "⛔")
@@ -817,7 +821,7 @@ class AnswerButtons(discord.ui.View):
             return
         if status == "correct":
             await self._safe_react(message, "✅")
-            await self._disable_active_view(channel_id)
+            await self._disable_active_view(result.question.id)
             public_embed = self._build_public_correct_embed(message.author, result)
             next_question_view = NextQuestionButton(self, message.author)
             if public_embed:
@@ -904,16 +908,14 @@ class NextQuestionButton(discord.ui.View):
             )
             return
 
-        # Check cooldown
-        channel_id = interaction.channel.id
+        # Check global cooldown
         current_time = time.time()
-        last_time = self.cog.last_question_time.get(channel_id, 0)
-        time_elapsed = current_time - last_time
+        time_elapsed = current_time - self.cog.last_question_time
 
         if time_elapsed < QUESTION_COOLDOWN_SECONDS:
             remaining = QUESTION_COOLDOWN_SECONDS - time_elapsed
             await interaction.response.send_message(
-                f"⏱️ Slow down! Please wait {remaining:.1f} more seconds before generating the next question.",
+                f"⏱️ A question was just generated! Please wait {remaining:.1f} more seconds before generating another.",
                 ephemeral=True,
             )
             return
