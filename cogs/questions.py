@@ -515,6 +515,7 @@ class QuestionCog(commands.Cog):
         difficulty = meta.get("difficulty", "Medium")
         model_name = meta.get("model", "stored")
         options = self._extract_options(question)
+        db.mark_question_fetched(question.id)
 
         return QuestionPayload(
             topic=question.topic,

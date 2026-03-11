@@ -1,7 +1,7 @@
 import logging
 import os
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -84,6 +84,7 @@ class Question(Base):
     explanation = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     answered_count = Column(Integer, default=0, nullable=False)
+    last_fetched_at = Column(DateTime, nullable=True)
 
     responses = relationship("Response", back_populates="question", cascade="all, delete-orphan")
 
@@ -99,6 +100,7 @@ class Question(Base):
             "explanation": self.explanation,
             "created_at": self.created_at.isoformat(),
             "answered_count": self.answered_count,
+            "last_fetched_at": self.last_fetched_at.isoformat() if self.last_fetched_at else None,
         }
 
 
@@ -149,7 +151,9 @@ def init_db() -> None:
     Base.metadata.create_all(ENGINE)
     _ensure_answered_count_column()
     _ensure_guild_default_model_column()
+    _ensure_last_fetched_at_column()
     _backfill_answered_count()
+    _backfill_last_fetched_at()
     LOGGER.info("Database initialised at %s", _resolve_database_url())
 
 
@@ -193,6 +197,26 @@ def _ensure_guild_default_model_column() -> None:
         LOGGER.warning("Could not add default_model column: %s", exc)
 
 
+def _ensure_last_fetched_at_column() -> None:
+    """Add last_fetched_at column to questions table if missing (SQLite migration)."""
+    if "sqlite" not in _resolve_database_url():
+        return
+
+    try:
+        with ENGINE.connect() as connection:
+            columns = connection.execute(text("PRAGMA table_info(questions)")).fetchall()
+            existing = {row[1] for row in columns}
+            if "last_fetched_at" in existing:
+                return
+            connection.execute(
+                text("ALTER TABLE questions ADD COLUMN last_fetched_at DATETIME")
+            )
+            connection.commit()
+            LOGGER.info("Added last_fetched_at column to questions table")
+    except SQLAlchemyError as exc:
+        LOGGER.warning("Could not add last_fetched_at column: %s", exc)
+
+
 def _backfill_answered_count() -> None:
     """Populate answered_count from response rows (safe to run repeatedly)."""
     try:
@@ -208,6 +232,18 @@ def _backfill_answered_count() -> None:
                     question.answered_count = int(count)
     except SQLAlchemyError as exc:
         LOGGER.warning("Could not backfill answered_count: %s", exc)
+
+
+def _backfill_last_fetched_at() -> None:
+    """Set last_fetched_at for existing rows that are missing it."""
+    try:
+        with get_session() as session:
+            cutoff = datetime.utcnow() - timedelta(minutes=30)
+            rows = session.query(Question).filter(Question.last_fetched_at.is_(None)).all()
+            for question in rows:
+                question.last_fetched_at = cutoff
+    except SQLAlchemyError as exc:
+        LOGGER.warning("Could not backfill last_fetched_at: %s", exc)
 
 
 @contextmanager
@@ -265,6 +301,7 @@ def record_question(
             explanation=explanation,
             message_id=message_id,
             channel_id=channel_id,
+            last_fetched_at=datetime.utcnow() - timedelta(minutes=30),
         )
         session.add(question)
         session.flush()
@@ -350,6 +387,7 @@ def fetch_recent_questions(limit: int = 20) -> List[Dict[str, Optional[str]]]:
 def fetch_unanswered_questions(limit: int = 20, topic: Optional[str] = None) -> List[Question]:
     """Return recent unanswered questions (answered_count == 0)."""
     with get_session() as session:
+        cutoff = datetime.utcnow() - timedelta(minutes=15)
         query = (
             session.query(Question)
             .outerjoin(Response, Question.id == Response.question_id)
@@ -358,6 +396,9 @@ def fetch_unanswered_questions(limit: int = 20, topic: Optional[str] = None) -> 
         )
         if topic:
             query = query.filter(Question.topic == topic)
+        query = query.filter(
+            (Question.last_fetched_at.is_(None)) | (Question.last_fetched_at <= cutoff)
+        )
         questions = query.order_by(func.random()).limit(limit).all()
         for question in questions:
             session.expunge(question)
@@ -374,6 +415,16 @@ def count_unanswered_questions() -> int:
             .having(func.count(Response.id) == 0)
             .count()
         )
+
+
+def mark_question_fetched(question_id: int) -> None:
+    """Update last_fetched_at for a question."""
+    with get_session() as session:
+        question = session.get(Question, question_id)
+        if not question:
+            return
+        question.last_fetched_at = datetime.utcnow()
+        session.add(question)
 
 
 def count_questions() -> int:
