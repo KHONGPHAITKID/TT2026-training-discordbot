@@ -451,11 +451,7 @@ class LLMClient:
         )[0]
 
         if not self._clients:
-            LOGGER.warning("No LLM clients available; attempting stored question.")
-            stored = self._reuse_stored_question(chosen_topic)
-            if stored:
-                self.model = stored.model_name
-                return stored
+            LOGGER.warning("No LLM clients available; using local fallback question.")
             fallback = self._fallback_question(chosen_topic)
             self.model = fallback.model_name
             return fallback
@@ -584,13 +580,9 @@ class LLMClient:
                 model_name=model_choice,
             )
 
-        # All retries exhausted, use stored question then fallback
-        LOGGER.error("All %d model attempts failed. Failed models: %s. Attempting stored question.",
+        # All retries exhausted, use fallback
+        LOGGER.error("All %d model attempts failed. Failed models: %s. Using fallback question.",
                     max_retries, failed_models)
-        stored = self._reuse_stored_question(chosen_topic)
-        if stored:
-            self.model = stored.model_name
-            return stored
         fallback = self._fallback_question(chosen_topic)
         self.model = fallback.model_name
         return fallback

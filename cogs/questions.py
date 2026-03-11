@@ -442,9 +442,7 @@ class QuestionCog(commands.Cog):
     async def publish_question(self, channel: discord.abc.Messageable, topic: Optional[str] = None) -> None:
         async with self.publish_lock:
             model_override = self._get_default_model_for_channel(channel)
-            payload = self._get_unanswered_payload(topic, model_override)
-            if payload is None:
-                payload = self.client.generate_question(topic, model=model_override)
+            payload = self.client.generate_question(topic, model=model_override)
             difficulty = payload.difficulty or "Medium"
             model_name = payload.model_name or "Unknown"
             db_prompt = f"[Difficulty: {difficulty}][Model: {model_name}] {payload.question}"
