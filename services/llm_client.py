@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from groq import Groq
 import anthropic
 
 try:
@@ -37,7 +36,132 @@ class QuestionPayload:
     model_name: str = "unknown"
 
 
-class GroqClient:
+class ProviderAdapter:
+    def build_request(
+        self,
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        settings: Dict[str, Any],
+        provider_params: Dict[str, Any],
+        model_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def send(self, client: Any, request: Dict[str, Any]) -> Any:
+        raise NotImplementedError
+
+    def extract_text(self, response: Any) -> Optional[str]:
+        raise NotImplementedError
+
+
+class OpenAIResponsesAdapter(ProviderAdapter):
+    def build_request(
+        self,
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        settings: Dict[str, Any],
+        provider_params: Dict[str, Any],
+        model_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        params.update(provider_params)
+        params.update(model_params)
+
+        max_output_tokens = params.pop("max_output_tokens", None)
+        if max_output_tokens is None:
+            max_output_tokens = settings.get("max_tokens", 2048)
+
+        input_text = params.pop("input", None)
+        if input_text is None:
+            input_text = f"{system_prompt}\n{user_prompt}"
+
+        request: Dict[str, Any] = {
+            "model": model_name,
+            "max_output_tokens": max_output_tokens,
+            "input": input_text,
+        }
+
+        if "reasoning" in params:
+            request["reasoning"] = params.pop("reasoning")
+        if "temperature" in params:
+            request["temperature"] = params.pop("temperature")
+        if "response_format" in params:
+            request["response_format"] = params.pop("response_format")
+
+        request.update(params)
+        return request
+
+    def send(self, client: Any, request: Dict[str, Any]) -> Any:
+        return client.responses.create(**request)
+
+    def extract_text(self, response: Any) -> Optional[str]:
+        return getattr(response, "output_text", None)
+
+
+class AnthropicMessagesAdapter(ProviderAdapter):
+    def build_request(
+        self,
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        settings: Dict[str, Any],
+        provider_params: Dict[str, Any],
+        model_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        params.update(provider_params)
+        params.update(model_params)
+
+        max_tokens = params.pop("max_tokens", None)
+        if max_tokens is None:
+            max_tokens = settings.get("max_tokens", 2048)
+
+        system_text = params.pop("system", system_prompt)
+        messages = params.pop(
+            "messages",
+            [
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                }
+            ],
+        )
+
+        request: Dict[str, Any] = {
+            "model": model_name,
+            "max_tokens": max_tokens,
+            "system": system_text,
+            "messages": messages,
+        }
+
+        if "temperature" in params:
+            request["temperature"] = params.pop("temperature")
+
+        request.update(params)
+        return request
+
+    def send(self, client: Any, request: Dict[str, Any]) -> Any:
+        return client.messages.create(**request)
+
+    def extract_text(self, response: Any) -> Optional[str]:
+        content = getattr(response, "content", None)
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text" and block.get("text"):
+                        parts.append(block["text"])
+                else:
+                    text = getattr(block, "text", None)
+                    if text:
+                        parts.append(text)
+            return "".join(parts).strip()
+        return content
+
+
+class LLMClient:
     """Wrapper around LLM APIs (Groq, OpenAI, etc.) used to request multiple-choice questions.
 
     Configuration is loaded from models.json in the project root.
@@ -45,7 +169,7 @@ class GroqClient:
     """
 
     # Default fallback models if config file is not found
-    AVAILABLE_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"]
+    AVAILABLE_MODELS = ["gpt-5.4"]
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, timeout: int = 30):
         # Load configuration from models.json
@@ -57,7 +181,9 @@ class GroqClient:
         self.available_topics = self._load_topics()
 
         # Build list of available models from enabled providers
-        self.available_models = self._get_available_models()
+        self.model_specs = self._get_model_specs()
+        self.available_models = [spec["name"] for spec in self.model_specs]
+        self._model_index = {spec["name"]: spec for spec in self.model_specs}
 
         self.model = model or random.choice(self.available_models if self.available_models else self.AVAILABLE_MODELS)
         self.timeout = self.settings.get("timeout", timeout)
@@ -65,6 +191,12 @@ class GroqClient:
         # Initialize clients for all enabled providers
         self._clients: Dict[str, Any] = {}
         self._initialize_provider_clients()
+
+        self._adapters = {
+            "openai": OpenAIResponsesAdapter(),
+            "anthropic": AnthropicMessagesAdapter(),
+            "claude": AnthropicMessagesAdapter(),
+        }
 
     @staticmethod
     def _load_config() -> Dict:
@@ -127,27 +259,59 @@ class GroqClient:
             LOGGER.error("Failed to load topics.json: %s. Using default topics.", exc)
             return DEFAULT_TOPICS
 
-    def _get_available_models(self) -> List[str]:
-        """Extract available models from all enabled providers.
+    def _get_model_specs(self) -> List[Dict[str, Any]]:
+        """Extract model specs from all enabled providers.
 
-        Returns:
-            List of model names that can be used for generation.
+        Each spec has: name, provider, params.
         """
-        models = []
+        specs: List[Dict[str, Any]] = []
         providers = self.config.get("providers", {})
 
         for provider_name, provider_config in providers.items():
-            if provider_config.get("enabled", False):
-                provider_models = provider_config.get("models", [])
-                models.extend(provider_models)
-                LOGGER.info("Provider '%s' enabled with %d models: %s",
-                           provider_name, len(provider_models), provider_models)
+            if not provider_config.get("enabled", False):
+                continue
+            provider_models = provider_config.get("models", [])
 
-        if not models:
+            for entry in provider_models:
+                if isinstance(entry, str):
+                    model_name = entry
+                    model_params: Dict[str, Any] = {}
+                elif isinstance(entry, dict):
+                    model_name = entry.get("name") or entry.get("model")
+                    model_params = entry.get("params", {}) or {}
+                else:
+                    continue
+
+                if not model_name:
+                    continue
+
+                specs.append(
+                    {
+                        "name": model_name,
+                        "provider": provider_name,
+                        "params": model_params,
+                    }
+                )
+
+            LOGGER.info(
+                "Provider '%s' enabled with %d models: %s",
+                provider_name,
+                len(provider_models),
+                provider_models,
+            )
+
+        if not specs:
             LOGGER.warning("No enabled providers found in config, using default models")
-            return self.AVAILABLE_MODELS
+            return [
+                {
+                    "name": model_name,
+                    "provider": "openai",
+                    "params": {},
+                }
+                for model_name in self.AVAILABLE_MODELS
+            ]
 
-        return models
+        return specs
 
     def _get_provider_for_model(self, model_name: str) -> Optional[Tuple[str, Dict]]:
         """Find which provider configuration matches the given model.
@@ -158,13 +322,14 @@ class GroqClient:
         Returns:
             Tuple of (provider_name, provider_config) or None if not found.
         """
+        model_spec = self._model_index.get(model_name)
+        if not model_spec:
+            return None
+
+        provider_name = model_spec["provider"]
         providers = self.config.get("providers", {})
-
-        for provider_name, provider_config in providers.items():
-            if model_name in provider_config.get("models", []):
-                return (provider_name, provider_config)
-
-        return None
+        provider_config = providers.get(provider_name, {})
+        return (provider_name, provider_config)
 
     def _initialize_provider_clients(self) -> None:
         """Initialize API clients for all enabled providers.
@@ -192,32 +357,16 @@ class GroqClient:
 
             # Initialize the appropriate client based on provider name
             try:
-                if provider_name == "groq":
-                    client = Groq(api_key=api_key)
-                    self._clients[provider_name] = client
-                    LOGGER.info("Initialized Groq client successfully")
-
-                elif provider_name == "openai":
+                if provider_name == "openai":
                     if OpenAI is None:
                         LOGGER.error("OpenAI library not installed. Run: pip install openai")
                         continue
-                    base_url = provider_config.get("base_url")
-                    if base_url:
-                        client = OpenAI(api_key=api_key, base_url=base_url)
-                    else:
-                        client = OpenAI(api_key=api_key)
+                    client = OpenAI(api_key=api_key)
                     self._clients[provider_name] = client
                     LOGGER.info("Initialized OpenAI client successfully")
 
                 elif provider_name in ("anthropic", "claude"):
-                    base_url = provider_config.get("base_url")
-                    if base_url:
-                        try:
-                            client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
-                        except TypeError:
-                            client = anthropic.Anthropic(api_key=api_key)
-                    else:
-                        client = anthropic.Anthropic(api_key=api_key)
+                    client = anthropic.Anthropic(api_key=api_key)
                     self._clients[provider_name] = client
                     LOGGER.info("Initialized Anthropic client successfully")
 
@@ -271,6 +420,10 @@ class GroqClient:
 
         return (provider_name, client)
 
+    def _get_model_params(self, model_name: str) -> Dict[str, Any]:
+        spec = self._model_index.get(model_name)
+        return spec.get("params", {}) if spec else {}
+
     def generate_question(self, topic: Optional[str] = None) -> QuestionPayload:
         """Generate a question via configured LLM providers or fall back to local questions.
 
@@ -318,10 +471,6 @@ class GroqClient:
             topic=chosen_topic
         )
 
-        # Get generation settings from config
-        temperature = self.settings.get("temperature", 0.7)
-        max_tokens = self.settings.get("max_tokens", 2048)
-
         failed_models = []
 
         for attempt_num, model_choice in enumerate(models_to_try, start=1):
@@ -337,36 +486,26 @@ class GroqClient:
                 continue
 
             try:
-                if provider_name in ("anthropic", "claude"):
-                    response = client.messages.create(
-                        model=model_choice,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        system=system_prompt,
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": user_prompt,
-                            }
-                        ],
-                    )
-                else:
-                    response = client.chat.completions.create(
-                        model=model_choice,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        response_format={"type": "json_object"},
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": system_prompt,
-                            },
-                            {
-                                "role": "user",
-                                "content": user_prompt,
-                            },
-                        ],
-                    )
+                adapter = self._adapters.get(provider_name)
+                if not adapter:
+                    LOGGER.warning("Attempt %d/%d: No adapter for provider '%s'",
+                                  attempt_num, max_retries, provider_name)
+                    failed_models.append((model_choice, f"No adapter for provider '{provider_name}'"))
+                    continue
+
+                provider_config = self.config.get("providers", {}).get(provider_name, {})
+                provider_params = provider_config.get("default_params", {}) or {}
+                model_params = self._get_model_params(model_choice)
+
+                request = adapter.build_request(
+                    model_name=model_choice,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    settings=self.settings,
+                    provider_params=provider_params,
+                    model_params=model_params,
+                )
+                response = adapter.send(client, request)
             except Exception as exc:  # pragma: no cover - network/API failure
                 LOGGER.warning("Attempt %d/%d: Model '%s' API call failed: %s",
                               attempt_num, max_retries, model_choice, str(exc))
@@ -374,23 +513,9 @@ class GroqClient:
                 continue
 
             try:
-                if provider_name in ("anthropic", "claude"):
-                    content = getattr(response, "content", None)
-                    if isinstance(content, list):
-                        parts: List[str] = []
-                        for block in content:
-                            if isinstance(block, dict):
-                                if block.get("type") == "text" and block.get("text"):
-                                    parts.append(block["text"])
-                            else:
-                                text = getattr(block, "text", None)
-                                if text:
-                                    parts.append(text)
-                        message_content = "".join(parts).strip()
-                    else:
-                        message_content = content
-                else:
-                    message_content = response.choices[0].message.content
+                adapter = self._adapters.get(provider_name)
+                message_content = adapter.extract_text(response) if adapter else None
+
                 if isinstance(message_content, dict):
                     parsed = message_content
                 else:

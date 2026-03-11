@@ -13,7 +13,7 @@ from apscheduler.triggers.cron import CronTrigger
 from discord.ext import commands
 
 from services import db
-from services.groq_client import GroqClient, QuestionPayload
+from services.llm_client import LLMClient, QuestionPayload
 from services.utils import normalise_answer
 
 try:
@@ -45,7 +45,7 @@ class QuestionCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.client = GroqClient()
+        self.client = LLMClient()
         tz_name = os.getenv("BOT_TIMEZONE", "UTC")
         self.timezone = self._safe_timezone(tz_name)
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)

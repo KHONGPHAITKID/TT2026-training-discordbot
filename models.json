@@ -1,12 +1,6 @@
 {
   "_comment": "LLM Provider Configuration - Add/remove providers by setting 'enabled' to true/false. Models are randomly selected from all enabled providers. API keys are loaded from environment variables specified in 'api_key_env'.",
   "providers": {
-    "groq": {
-      "enabled": true,
-      "api_key_env": "GROQ_API_KEY",
-      "base_url": null,
-      "models": []
-    },
     "claude": {
       "enabled": true,
       "api_key_env": "ANTHROPIC_API_KEY",
@@ -17,9 +11,15 @@
     "openai": {
       "enabled": true,
       "api_key_env": "OPENAI_API_KEY",
-      "base_url": "https://api.openai.com/v1",
       "models": [
-        "gpt-5.4"
+        {
+          "name": "gpt-5.4",
+          "params": {
+            "reasoning": {
+              "effort": "medium"
+            }
+          }
+        }
       ]
     }
   },
