@@ -133,12 +133,14 @@ class GuildConfig(Base):
     guild_id = Column(Integer, primary_key=True, autoincrement=False)
     daily_channel_id = Column(Integer, nullable=True)
     admin_role_id = Column(Integer, nullable=True)
+    default_model = Column(String(120), nullable=True)
 
     def to_dict(self) -> Dict[str, Optional[int]]:
         return {
             "guild_id": self.guild_id,
             "daily_channel_id": self.daily_channel_id,
             "admin_role_id": self.admin_role_id,
+            "default_model": self.default_model,
         }
 
 
@@ -146,6 +148,7 @@ def init_db() -> None:
     """Create all tables if they do not already exist."""
     Base.metadata.create_all(ENGINE)
     _ensure_answered_count_column()
+    _ensure_guild_default_model_column()
     LOGGER.info("Database initialised at %s", _resolve_database_url())
 
 
@@ -167,6 +170,26 @@ def _ensure_answered_count_column() -> None:
             LOGGER.info("Added answered_count column to questions table")
     except SQLAlchemyError as exc:
         LOGGER.warning("Could not add answered_count column: %s", exc)
+
+
+def _ensure_guild_default_model_column() -> None:
+    """Add default_model column to guild_config table if missing (SQLite migration)."""
+    if "sqlite" not in _resolve_database_url():
+        return
+
+    try:
+        with ENGINE.connect() as connection:
+            columns = connection.execute(text("PRAGMA table_info(guild_config)")).fetchall()
+            existing = {row[1] for row in columns}
+            if "default_model" in existing:
+                return
+            connection.execute(
+                text("ALTER TABLE guild_config ADD COLUMN default_model VARCHAR(120)")
+            )
+            connection.commit()
+            LOGGER.info("Added default_model column to guild_config table")
+    except SQLAlchemyError as exc:
+        LOGGER.warning("Could not add default_model column: %s", exc)
 
 
 @contextmanager
@@ -248,6 +271,7 @@ def record_response(
     username: str,
     answer: str,
     is_correct: bool,
+    difficulty: Optional[str] = None,
 ) -> Response:
     """Record a user response and update their stats atomically."""
     with get_session() as session:
@@ -261,7 +285,9 @@ def record_response(
         user.last_answer_time = datetime.utcnow()
         user.name = username
         if is_correct:
-            user.score += 10
+            score_map = {"Easy": 5, "Medium": 10, "Hard": 20}
+            points = score_map.get((difficulty or "").title(), 10)
+            user.score += points
             user.correct += 1
         else:
             user.wrong += 1
@@ -313,6 +339,24 @@ def fetch_unanswered_questions(limit: int = 20, topic: Optional[str] = None) -> 
         for question in questions:
             session.expunge(question)
         return questions
+
+
+def count_unanswered_questions() -> int:
+    """Return number of unanswered questions (answered_count == 0)."""
+    with get_session() as session:
+        return int(session.query(func.count(Question.id)).filter(Question.answered_count == 0).scalar() or 0)
+
+
+def count_questions() -> int:
+    """Return total number of stored questions."""
+    with get_session() as session:
+        return int(session.query(func.count(Question.id)).scalar() or 0)
+
+
+def count_answered_questions() -> int:
+    """Return number of questions that have at least one answer."""
+    with get_session() as session:
+        return int(session.query(func.count(Question.id)).filter(Question.answered_count > 0).scalar() or 0)
 
 
 def get_question(question_id: int) -> Optional[Question]:

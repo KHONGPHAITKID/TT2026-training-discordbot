@@ -2,10 +2,12 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import discord
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -25,6 +27,47 @@ LOGGER = logging.getLogger(__name__)
 
 OPTION_LABELS = {"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"}
 QUESTION_COOLDOWN_SECONDS = 5  # Global cooldown between question generations (applies bot-wide)
+
+
+def _load_supported_topics() -> List[str]:
+    topics_path = Path(__file__).parent.parent / "topics.json"
+    if not topics_path.exists():
+        return []
+    try:
+        with open(topics_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        categories = data.get("categories", {})
+        topics: List[str] = []
+        for _, cat in categories.items():
+            if cat.get("enabled", True):
+                topics.extend(cat.get("topics", []))
+        return topics
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _topic_supported(topic: str, supported: List[str]) -> bool:
+    topic_norm = topic.strip().lower()
+    return any(topic_norm == item.strip().lower() for item in supported)
+
+
+def _load_topics_with_ids() -> List[Tuple[int, str]]:
+    topics = _load_supported_topics()
+    return list(enumerate(topics, start=1))
+
+
+def _resolve_topic_input(topic_input: str) -> Optional[str]:
+    value = topic_input.strip()
+    if not value:
+        return None
+    if value.isdigit():
+        topic_id = int(value)
+        for tid, topic in _load_topics_with_ids():
+            if tid == topic_id:
+                return topic
+        return None
+    supported = _load_supported_topics()
+    return value if _topic_supported(value, supported) else None
 
 
 @dataclass
@@ -287,6 +330,7 @@ class QuestionCog(commands.Cog):
             username=str(user),
             answer=choice,
             is_correct=is_correct,
+            difficulty=difficulty,
         )
 
         if is_correct:
@@ -390,9 +434,10 @@ class QuestionCog(commands.Cog):
 
     async def publish_question(self, channel: discord.abc.Messageable, topic: Optional[str] = None) -> None:
         async with self.publish_lock:
-            payload = self._get_unanswered_payload(topic)
+            model_override = self._get_default_model_for_channel(channel)
+            payload = self._get_unanswered_payload(topic, model_override)
             if payload is None:
-                payload = self.client.generate_question(topic)
+                payload = self.client.generate_question(topic, model=model_override)
             difficulty = payload.difficulty or "Medium"
             model_name = payload.model_name or "Unknown"
             db_prompt = f"[Difficulty: {difficulty}][Model: {model_name}] {payload.question}"
@@ -436,13 +481,24 @@ class QuestionCog(commands.Cog):
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
                 db.attach_message_id(question_record.id, message.id)
 
-    def _get_unanswered_payload(self, topic: Optional[str]) -> Optional[QuestionPayload]:
+    def _get_unanswered_payload(self, topic: Optional[str], model: Optional[str]) -> Optional[QuestionPayload]:
         """Prefer reusing unanswered stored questions to avoid slow generation."""
         try:
             candidates = db.fetch_unanswered_questions(limit=25, topic=topic)
         except Exception as exc:  # pragma: no cover - db failure
             LOGGER.warning("Failed to fetch unanswered questions: %s", exc)
             return None
+
+        if not candidates:
+            return None
+
+        if model:
+            filtered = []
+            for question in candidates:
+                meta = self._get_question_metadata(question)
+                if meta.get("model") == model:
+                    filtered.append(question)
+            candidates = filtered
 
         if not candidates:
             return None
@@ -462,6 +518,14 @@ class QuestionCog(commands.Cog):
             difficulty=difficulty,
             model_name=model_name,
         )
+
+    @staticmethod
+    def _get_default_model_for_channel(channel: discord.abc.Messageable) -> Optional[str]:
+        guild = getattr(channel, "guild", None)
+        if not guild:
+            return None
+        config = db.get_guild_config(guild.id)
+        return config.default_model
 
     def _build_question_embed(
         self,
@@ -599,6 +663,13 @@ class QuestionCog(commands.Cog):
             await ctx.reply("This command is only available in servers.")
             return
 
+        if topic:
+            resolved = _resolve_topic_input(topic)
+            if not resolved:
+                await ctx.reply("Topic not supported. Please use /topic to view supported topics.")
+                return
+            topic = resolved
+
         # Check global cooldown
         current_time = time.time()
         time_elapsed = current_time - self.last_question_time
@@ -627,6 +698,44 @@ class QuestionCog(commands.Cog):
     async def q_command(self, ctx: commands.Context, *, topic: Optional[str] = None) -> None:
         await self._handle_question_request(ctx, topic)
 
+    @commands.hybrid_command(name="fetch", with_app_command=True, description="Fetch questions into the database.")
+    async def fetch_command(self, ctx: commands.Context, number: Optional[int] = 1) -> None:
+        if not ctx.guild:
+            await ctx.reply("This command is only available in servers.")
+            return
+
+        count = number or 1
+        if count < 1:
+            await ctx.reply("Please request at least 1 question.")
+            return
+        if count > 5:
+            count = 5
+
+        interaction = getattr(ctx, "interaction", None)
+        if interaction and not interaction.response.is_done():
+            await interaction.response.defer(thinking=True)
+
+        stored = 0
+        for _ in range(count):
+            try:
+                payload = self.client.generate_question()
+                difficulty = payload.difficulty or "Medium"
+                model_name = payload.model_name or "Unknown"
+                db_prompt = f"[Difficulty: {difficulty}][Model: {model_name}] {payload.question}"
+                db.record_question(
+                    topic=payload.topic,
+                    prompt=db_prompt,
+                    options=payload.options,
+                    correct_answer=payload.answer,
+                    explanation=payload.explanation,
+                )
+                stored += 1
+            except Exception as exc:  # pragma: no cover - network/db failure
+                LOGGER.warning("Fetch question failed: %s", exc)
+                break
+
+        await ctx.reply(f"Fetched {stored} question(s) into the database.")
+
     @commands.hybrid_command(name="ans", with_app_command=True, description="Reveal the most recent question's answer.")
     async def answer_command(self, ctx: commands.Context) -> None:
         if not ctx.guild:
@@ -638,6 +747,17 @@ class QuestionCog(commands.Cog):
             await ctx.reply("No question found for this channel yet.", mention_author=False)
             return
         await ctx.reply(embed=embed, mention_author=False)
+
+    @commands.hybrid_command(name="topic", with_app_command=True, description="List supported quiz topics.")
+    async def topic_command(self, ctx: commands.Context) -> None:
+        topics_with_ids = _load_topics_with_ids()
+        if not topics_with_ids:
+            await ctx.reply("No topics are currently configured.")
+            return
+        content = "Supported topics:\n" + "\n".join(
+            f"{topic_id}. {topic}" for topic_id, topic in topics_with_ids
+        )
+        await ctx.reply(content)
 
 
 class AnswerButtons(discord.ui.View):
@@ -963,7 +1083,6 @@ class AnswerButtons(discord.ui.View):
             await message.add_reaction(emoji)
         except discord.HTTPException:
             LOGGER.debug("Failed to add reaction %s to message %s", emoji, message.id)
-
 
 class NextQuestionButton(discord.ui.View):
     """A button that allows users to quickly generate the next question."""

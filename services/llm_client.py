@@ -171,7 +171,7 @@ class AnthropicMessagesAdapter(ProviderAdapter):
 
 
 class LLMClient:
-    """Wrapper around LLM APIs (Groq, OpenAI, etc.) used to request multiple-choice questions.
+    """Wrapper around LLM APIs (OpenAI, Anthropic, etc.) used to request multiple-choice questions.
 
     Configuration is loaded from models.json in the project root.
     Supports multiple providers and automatically retries with different models on failure.
@@ -433,12 +433,16 @@ class LLMClient:
         spec = self._model_index.get(model_name)
         return spec.get("params", {}) if spec else {}
 
-    def generate_question(self, topic: Optional[str] = None) -> QuestionPayload:
+    def generate_question(self, topic: Optional[str] = None, model: Optional[str] = None) -> QuestionPayload:
         """Generate a question via configured LLM providers or fall back to local questions.
 
         Retry logic: Attempts up to max_retries (default 3) different models before falling back.
         """
-        chosen_topic = topic or random.choice(self.available_topics)
+        if topic:
+            chosen_topic = topic
+        else:
+            self.available_topics = self._load_topics()
+            chosen_topic = random.choice(self.available_topics)
         # Weighted random selection: 50% Easy, 30% Medium, 20% Hard
         target_difficulty = random.choices(
             ["Easy", "Medium", "Hard"],
@@ -457,8 +461,19 @@ class LLMClient:
             return fallback
 
         # Prepare models to try - shuffle for variety, limit to max_retries
-        models_to_try = self.available_models[:]
-        random.shuffle(models_to_try)
+        if model:
+            if model in self.available_models:
+                fallback_models = [m for m in self.available_models if m != model]
+                random.shuffle(fallback_models)
+                models_to_try = [model] + fallback_models
+            else:
+                LOGGER.warning("Requested model '%s' not found in available models.", model)
+                models_to_try = self.available_models[:]
+                random.shuffle(models_to_try)
+        else:
+            models_to_try = self.available_models[:]
+            random.shuffle(models_to_try)
+
         max_retries = self.settings.get("max_retries", 3)
         models_to_try = models_to_try[:max_retries]
 

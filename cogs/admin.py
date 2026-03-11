@@ -5,6 +5,9 @@ import discord
 from discord.ext import commands
 
 from services import db
+from services.llm_client import LLMClient
+from pathlib import Path
+import json
 
 LOGGER = logging.getLogger(__name__)
 
@@ -70,6 +73,150 @@ class AdminCog(commands.Cog):
                 user.correct = 0
                 user.wrong = 0
         await ctx.reply("All scores have been reset.")
+
+    @commands.hybrid_command(name="set_model", with_app_command=True, description="Set default LLM model for this server.")
+    @is_admin()
+    async def set_model(self, ctx: commands.Context, *, model: str) -> None:
+        if not ctx.guild:
+            await ctx.reply("This command can only be used within a server.")
+            return
+
+        model_name = model.strip()
+        if not model_name:
+            await ctx.reply("Please provide a model name or 'random'.")
+            return
+
+        if model_name.lower() == "random":
+            db.update_guild_config(ctx.guild.id, default_model=None)
+            await ctx.reply("Default model set to random.")
+            return
+
+        client = LLMClient()
+        supported = client.available_models
+        if model_name not in supported:
+            supported_list = ", ".join(supported) if supported else "No models configured."
+            await ctx.reply(f"Model not supported. Available models: {supported_list}")
+            return
+
+        db.update_guild_config(ctx.guild.id, default_model=model_name)
+        await ctx.reply(f"Default model set to {model_name}.")
+
+    @commands.hybrid_command(name="remove_model", with_app_command=True, description="Clear the default LLM model.")
+    @is_admin()
+    async def remove_model(self, ctx: commands.Context) -> None:
+        if not ctx.guild:
+            await ctx.reply("This command can only be used within a server.")
+            return
+        db.update_guild_config(ctx.guild.id, default_model=None)
+        await ctx.reply("Default model cleared. The bot will use random models.")
+
+    @commands.hybrid_command(name="model", with_app_command=True, description="Show current model and supported options.")
+    async def model(self, ctx: commands.Context) -> None:
+        if not ctx.guild:
+            await ctx.reply("This command can only be used within a server.")
+            return
+
+        config = db.get_guild_config(ctx.guild.id)
+        current = config.default_model or "random"
+        client = LLMClient()
+        supported = client.available_models
+        supported_list = ", ".join(["random"] + supported) if supported else "random"
+
+        message = (
+            f"Current model: {current}\n"
+            f"Supported models: {supported_list}\n"
+            "Use `/set_model <model>` to pin a model, `/set_model random` or `/remove_model` to reset."
+        )
+        await ctx.reply(message)
+
+    @commands.hybrid_command(name="add_topic", with_app_command=True, description="Add a quiz topic.")
+    @is_admin()
+    async def add_topic(self, ctx: commands.Context, *, topic: str) -> None:
+        if not ctx.guild:
+            await ctx.reply("This command can only be used within a server.")
+            return
+
+        topic_name = topic.strip()
+        if not topic_name:
+            await ctx.reply("Please provide a topic name.")
+            return
+
+        topics_path = Path(__file__).parent.parent / "topics.json"
+        if not topics_path.exists():
+            await ctx.reply("topics.json not found.")
+            return
+
+        try:
+            with open(topics_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            await ctx.reply("Unable to read topics.json.")
+            return
+
+        categories = data.setdefault("categories", {})
+        for cat in categories.values():
+            existing = [t.lower() for t in cat.get("topics", [])]
+            if topic_name.lower() in existing:
+                await ctx.reply("Topic already exists.")
+                return
+
+        custom = categories.setdefault(
+            "custom",
+            {
+                "display_name": "Custom Topics",
+                "enabled": True,
+                "topics": [],
+            },
+        )
+        custom_topics = custom.setdefault("topics", [])
+        custom_topics.append(topic_name)
+
+        with open(topics_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        await ctx.reply(f"Added topic: {topic_name}")
+
+    @commands.hybrid_command(name="remove_topic", with_app_command=True, description="Remove a quiz topic.")
+    @is_admin()
+    async def remove_topic(self, ctx: commands.Context, *, topic: str) -> None:
+        if not ctx.guild:
+            await ctx.reply("This command can only be used within a server.")
+            return
+
+        topic_name = topic.strip()
+        if not topic_name:
+            await ctx.reply("Please provide a topic name.")
+            return
+
+        topics_path = Path(__file__).parent.parent / "topics.json"
+        if not topics_path.exists():
+            await ctx.reply("topics.json not found.")
+            return
+
+        try:
+            with open(topics_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            await ctx.reply("Unable to read topics.json.")
+            return
+
+        categories = data.get("categories", {})
+        removed = False
+        for cat in categories.values():
+            topics = cat.get("topics", [])
+            new_topics = [t for t in topics if t.strip().lower() != topic_name.lower()]
+            if len(new_topics) != len(topics):
+                cat["topics"] = new_topics
+                removed = True
+
+        if not removed:
+            await ctx.reply("Topic not found.")
+            return
+
+        with open(topics_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        await ctx.reply(f"Removed topic: {topic_name}")
 
 
 async def setup(bot: commands.Bot) -> None:
