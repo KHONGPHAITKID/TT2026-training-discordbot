@@ -335,7 +335,7 @@ def fetch_unanswered_questions(limit: int = 20, topic: Optional[str] = None) -> 
         query = session.query(Question).filter(Question.answered_count == 0)
         if topic:
             query = query.filter(Question.topic == topic)
-        questions = query.order_by(Question.created_at.desc()).limit(limit).all()
+        questions = query.order_by(func.random()).limit(limit).all()
         for question in questions:
             session.expunge(question)
         return questions

@@ -388,9 +388,10 @@ class QuestionCog(commands.Cog):
         # Replace literal \n with actual newlines
         option_text = option_text.replace("\\n", "\n")
         label = OPTION_LABELS.get(result.choice, f"Option {result.choice}")
+        points = self._points_for_difficulty(result.difficulty)
         embed = discord.Embed(
             title="Correct Answer!",
-            description=f"{member.mention} chose **{label}** and earned **+10 points**!",
+            description=f"{member.mention} chose **{label}** and earned **+{points} points**!",
             color=discord.Color.from_rgb(28, 187, 140),
         )
         # Split long option texts if needed
@@ -419,6 +420,12 @@ class QuestionCog(commands.Cog):
                     embed.add_field(name=field_name, value=chunk, inline=False)
         embed.set_footer(text="Ready for the next challenge? Click the button below!")
         return embed
+
+    @staticmethod
+    def _points_for_difficulty(difficulty: Optional[str]) -> int:
+        mapping = {"Easy": 5, "Medium": 10, "Hard": 20}
+        key = (difficulty or "").title()
+        return mapping.get(key, 10)
 
     def _build_already_solved_embed(self, guild: discord.Guild, solver_id: Optional[int]) -> discord.Embed:
         solver_reference = "someone"
