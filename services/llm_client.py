@@ -509,45 +509,58 @@ class LLMClient:
                 failed_models.append((model_choice, "No client available"))
                 continue
 
-            try:
-                adapter = self._adapters.get(provider_name)
-                if not adapter:
-                    LOGGER.warning("Attempt %d/%d: No adapter for provider '%s'",
-                                  attempt_num, max_retries, provider_name)
-                    failed_models.append((model_choice, f"No adapter for provider '{provider_name}'"))
-                    continue
-
-                provider_config = self.config.get("providers", {}).get(provider_name, {})
-                provider_params = provider_config.get("default_params", {}) or {}
-                model_params = self._get_model_params(model_choice)
-
-                request = adapter.build_request(
-                    model_name=model_choice,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    settings=self.settings,
-                    provider_params=provider_params,
-                    model_params=model_params,
-                )
-                response = adapter.send(client, request)
-            except Exception as exc:  # pragma: no cover - network/API failure
-                LOGGER.warning("Attempt %d/%d: Model '%s' API call failed: %s",
-                              attempt_num, max_retries, model_choice, str(exc))
-                failed_models.append((model_choice, f"API error: {str(exc)}"))
+            adapter = self._adapters.get(provider_name)
+            if not adapter:
+                LOGGER.warning("Attempt %d/%d: No adapter for provider '%s'",
+                              attempt_num, max_retries, provider_name)
+                failed_models.append((model_choice, f"No adapter for provider '{provider_name}'"))
                 continue
 
-            try:
-                adapter = self._adapters.get(provider_name)
-                message_content = adapter.extract_text(response) if adapter else None
+            provider_config = self.config.get("providers", {}).get(provider_name, {})
+            provider_params = provider_config.get("default_params", {}) or {}
+            model_params = self._get_model_params(model_choice)
 
-                if isinstance(message_content, dict):
-                    parsed = message_content
-                else:
-                    parsed = json.loads(message_content)
-            except (IndexError, KeyError, ValueError, TypeError) as exc:
-                LOGGER.warning("Attempt %d/%d: Model '%s' returned unparseable response: %s",
-                              attempt_num, max_retries, model_choice, str(exc))
-                failed_models.append((model_choice, f"Parse error: {str(exc)}"))
+            parsed = None
+            parse_retries = 3
+            for parse_try in range(1, parse_retries + 1):
+                try:
+                    request = adapter.build_request(
+                        model_name=model_choice,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        settings=self.settings,
+                        provider_params=provider_params,
+                        model_params=model_params,
+                    )
+                    response = adapter.send(client, request)
+                except Exception as exc:  # pragma: no cover - network/API failure
+                    LOGGER.warning("Attempt %d/%d (call %d/%d): Model '%s' API call failed: %s",
+                                  attempt_num, max_retries, parse_try, parse_retries, model_choice, str(exc))
+                    failed_models.append((model_choice, f"API error: {str(exc)}"))
+                    parsed = None
+                    break
+
+                try:
+                    message_content = adapter.extract_text(response)
+                    if isinstance(message_content, dict):
+                        parsed = message_content
+                    else:
+                        parsed = json.loads(message_content)
+                    break
+                except (IndexError, KeyError, ValueError, TypeError) as exc:
+                    LOGGER.warning(
+                        "Attempt %d/%d (parse %d/%d): Model '%s' returned unparseable response: %s",
+                        attempt_num,
+                        max_retries,
+                        parse_try,
+                        parse_retries,
+                        model_choice,
+                        str(exc),
+                    )
+                    parsed = None
+
+            if parsed is None:
+                failed_models.append((model_choice, "Parse error: exceeded retries"))
                 continue
 
             # Validate response structure
