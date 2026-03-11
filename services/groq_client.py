@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from groq import Groq
+import anthropic
 
 try:
     from openai import OpenAI
@@ -208,10 +209,17 @@ class GroqClient:
                     self._clients[provider_name] = client
                     LOGGER.info("Initialized OpenAI client successfully")
 
-                elif provider_name == "anthropic":
-                    LOGGER.warning("Anthropic provider configured but not yet implemented")
-                    # TODO: Add Anthropic client support
-                    continue
+                elif provider_name in ("anthropic", "claude"):
+                    base_url = provider_config.get("base_url")
+                    if base_url:
+                        try:
+                            client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
+                        except TypeError:
+                            client = anthropic.Anthropic(api_key=api_key)
+                    else:
+                        client = anthropic.Anthropic(api_key=api_key)
+                    self._clients[provider_name] = client
+                    LOGGER.info("Initialized Anthropic client successfully")
 
                 else:
                     LOGGER.warning("Unknown provider '%s', skipping", provider_name)
@@ -246,6 +254,22 @@ class GroqClient:
             return None
 
         return client
+
+    def _get_client_and_provider_for_model(self, model_name: str) -> Tuple[Optional[str], Optional[Any]]:
+        """Get both provider name and API client for a given model."""
+        provider_info = self._get_provider_for_model(model_name)
+        if not provider_info:
+            LOGGER.warning("No provider found for model '%s'", model_name)
+            return (None, None)
+
+        provider_name, _ = provider_info
+        client = self._clients.get(provider_name)
+
+        if not client:
+            LOGGER.warning("Client for provider '%s' not initialized", provider_name)
+            return (provider_name, None)
+
+        return (provider_name, client)
 
     def generate_question(self, topic: Optional[str] = None) -> QuestionPayload:
         """Generate a question via configured LLM providers or fall back to local questions.
@@ -296,7 +320,7 @@ class GroqClient:
 
         # Get generation settings from config
         temperature = self.settings.get("temperature", 0.7)
-        max_tokens = self.settings.get("max_tokens", 512)
+        max_tokens = self.settings.get("max_tokens", 2048)
 
         failed_models = []
 
@@ -305,7 +329,7 @@ class GroqClient:
                        attempt_num, max_retries, model_choice, chosen_topic)
 
             # Get the appropriate client for this model
-            client = self._get_client_for_model(model_choice)
+            provider_name, client = self._get_client_and_provider_for_model(model_choice)
             if not client:
                 LOGGER.warning("Attempt %d/%d: No client available for model '%s'",
                              attempt_num, max_retries, model_choice)
@@ -313,22 +337,36 @@ class GroqClient:
                 continue
 
             try:
-                response = client.chat.completions.create(
-                    model=model_choice,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format={"type": "json_object"},
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": system_prompt,
-                        },
-                        {
-                            "role": "user",
-                            "content": user_prompt,
-                        },
-                    ],
-                )
+                if provider_name in ("anthropic", "claude"):
+                    response = client.messages.create(
+                        model=model_choice,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        system=system_prompt,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": user_prompt,
+                            }
+                        ],
+                    )
+                else:
+                    response = client.chat.completions.create(
+                        model=model_choice,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_format={"type": "json_object"},
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": system_prompt,
+                            },
+                            {
+                                "role": "user",
+                                "content": user_prompt,
+                            },
+                        ],
+                    )
             except Exception as exc:  # pragma: no cover - network/API failure
                 LOGGER.warning("Attempt %d/%d: Model '%s' API call failed: %s",
                               attempt_num, max_retries, model_choice, str(exc))
@@ -336,7 +374,23 @@ class GroqClient:
                 continue
 
             try:
-                message_content = response.choices[0].message.content
+                if provider_name in ("anthropic", "claude"):
+                    content = getattr(response, "content", None)
+                    if isinstance(content, list):
+                        parts: List[str] = []
+                        for block in content:
+                            if isinstance(block, dict):
+                                if block.get("type") == "text" and block.get("text"):
+                                    parts.append(block["text"])
+                            else:
+                                text = getattr(block, "text", None)
+                                if text:
+                                    parts.append(text)
+                        message_content = "".join(parts).strip()
+                    else:
+                        message_content = content
+                else:
+                    message_content = response.choices[0].message.content
                 if isinstance(message_content, dict):
                     parsed = message_content
                 else:
