@@ -690,10 +690,19 @@ class QuestionCog(commands.Cog):
             return
 
         interaction = getattr(ctx, "interaction", None)
+        temp_message = None
         if interaction and not interaction.response.is_done():
             await interaction.response.defer(thinking=True)
+            await interaction.followup.send("Generating question, please wait...", ephemeral=True)
+        else:
+            temp_message = await ctx.reply("Generating question, please wait...", mention_author=False)
 
         await self.publish_question(ctx.channel, topic)
+        if temp_message:
+            try:
+                await temp_message.delete()
+            except discord.HTTPException:
+                pass
         # Silently post the question without extra confirmation messages
 
     @commands.hybrid_command(name="question", with_app_command=True, description="Request a new CS question.")
@@ -831,6 +840,7 @@ class AnswerButtons(discord.ui.View):
                 break
 
         await interaction.response.defer()
+        await interaction.followup.send("Generating question, please wait...", ephemeral=True)
 
         # Update the message to show the disabled "New Question" button
         try:
@@ -1122,6 +1132,7 @@ class NextQuestionButton(discord.ui.View):
         # Disable the button after it's clicked
         button.disabled = True
         await interaction.response.defer()
+        await interaction.followup.send("Generating question, please wait...", ephemeral=True)
 
         try:
             await interaction.message.edit(view=self)
