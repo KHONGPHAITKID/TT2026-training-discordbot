@@ -16,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     func,
+    text,
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import declarative_base, relationship, scoped_session, sessionmaker
@@ -82,6 +83,7 @@ class Question(Base):
     correct_answer = Column(String(2), nullable=False)
     explanation = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    answered_count = Column(Integer, default=0, nullable=False)
 
     responses = relationship("Response", back_populates="question", cascade="all, delete-orphan")
 
@@ -96,6 +98,7 @@ class Question(Base):
             "correct_answer": self.correct_answer,
             "explanation": self.explanation,
             "created_at": self.created_at.isoformat(),
+            "answered_count": self.answered_count,
         }
 
 
@@ -142,7 +145,28 @@ class GuildConfig(Base):
 def init_db() -> None:
     """Create all tables if they do not already exist."""
     Base.metadata.create_all(ENGINE)
+    _ensure_answered_count_column()
     LOGGER.info("Database initialised at %s", _resolve_database_url())
+
+
+def _ensure_answered_count_column() -> None:
+    """Add answered_count column to questions table if missing (SQLite migration)."""
+    if "sqlite" not in _resolve_database_url():
+        return
+
+    try:
+        with ENGINE.connect() as connection:
+            columns = connection.execute(text("PRAGMA table_info(questions)")).fetchall()
+            existing = {row[1] for row in columns}
+            if "answered_count" in existing:
+                return
+            connection.execute(
+                text("ALTER TABLE questions ADD COLUMN answered_count INTEGER NOT NULL DEFAULT 0")
+            )
+            connection.commit()
+            LOGGER.info("Added answered_count column to questions table")
+    except SQLAlchemyError as exc:
+        LOGGER.warning("Could not add answered_count column: %s", exc)
 
 
 @contextmanager
@@ -227,6 +251,7 @@ def record_response(
 ) -> Response:
     """Record a user response and update their stats atomically."""
     with get_session() as session:
+        question = session.get(Question, question_id)
         user = session.get(User, user_id)
         if not user:
             user = User(id=user_id, name=username)
@@ -240,6 +265,9 @@ def record_response(
             user.correct += 1
         else:
             user.wrong += 1
+
+        if question:
+            question.answered_count += 1
 
         response = Response(
             question_id=question_id,
@@ -273,6 +301,18 @@ def fetch_recent_questions(limit: int = 20) -> List[Dict[str, Optional[str]]]:
             session.query(Question).order_by(Question.created_at.desc()).limit(limit).all()
         )
         return [question.to_dict() for question in questions]
+
+
+def fetch_unanswered_questions(limit: int = 20, topic: Optional[str] = None) -> List[Question]:
+    """Return recent unanswered questions (answered_count == 0)."""
+    with get_session() as session:
+        query = session.query(Question).filter(Question.answered_count == 0)
+        if topic:
+            query = query.filter(Question.topic == topic)
+        questions = query.order_by(Question.created_at.desc()).limit(limit).all()
+        for question in questions:
+            session.expunge(question)
+        return questions
 
 
 def get_question(question_id: int) -> Optional[Question]:

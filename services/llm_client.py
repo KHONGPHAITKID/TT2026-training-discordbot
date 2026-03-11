@@ -36,6 +36,15 @@ class QuestionPayload:
     model_name: str = "unknown"
 
 
+@dataclass
+class StoredQuestion:
+    topic: str
+    prompt: str
+    options: Dict[str, str]
+    answer: str
+    explanation: Optional[str]
+
+
 class ProviderAdapter:
     def build_request(
         self,
@@ -438,7 +447,11 @@ class LLMClient:
         )[0]
 
         if not self._clients:
-            LOGGER.warning("No LLM clients available; using local fallback question.")
+            LOGGER.warning("No LLM clients available; attempting stored question.")
+            stored = self._reuse_stored_question(chosen_topic)
+            if stored:
+                self.model = stored.model_name
+                return stored
             fallback = self._fallback_question(chosen_topic)
             self.model = fallback.model_name
             return fallback
@@ -556,12 +569,51 @@ class LLMClient:
                 model_name=model_choice,
             )
 
-        # All retries exhausted, use fallback
-        LOGGER.error("All %d model attempts failed. Failed models: %s. Using fallback question.",
+        # All retries exhausted, use stored question then fallback
+        LOGGER.error("All %d model attempts failed. Failed models: %s. Attempting stored question.",
                     max_retries, failed_models)
+        stored = self._reuse_stored_question(chosen_topic)
+        if stored:
+            self.model = stored.model_name
+            return stored
         fallback = self._fallback_question(chosen_topic)
         self.model = fallback.model_name
         return fallback
+
+    def _reuse_stored_question(self, topic: str) -> Optional[QuestionPayload]:
+        """Try to reuse a recent stored question from the database."""
+        try:
+            from services import db
+        except Exception as exc:  # pragma: no cover - optional dependency
+            LOGGER.warning("Database module not available: %s", exc)
+            return None
+
+        try:
+            recent = db.fetch_recent_questions(limit=25)
+        except Exception as exc:  # pragma: no cover - db failure
+            LOGGER.warning("Failed to fetch stored questions: %s", exc)
+            return None
+
+        if not recent:
+            return None
+
+        candidates = [q for q in recent if q.get("topic") == topic]
+        pool = candidates if candidates else recent
+        choice = random.choice(pool)
+
+        try:
+            return QuestionPayload(
+                topic=choice.get("topic", topic),
+                question=choice.get("prompt", "No question stored."),
+                options=choice.get("options", {}),
+                answer=choice.get("correct_answer", "").strip().upper(),
+                explanation=choice.get("explanation"),
+                difficulty=None,
+                model_name="stored",
+            )
+        except Exception as exc:  # pragma: no cover
+            LOGGER.warning("Stored question malformed: %s", exc)
+            return None
 
     @staticmethod
     def _fallback_question(topic: str) -> QuestionPayload:

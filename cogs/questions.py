@@ -58,6 +58,7 @@ class QuestionCog(commands.Cog):
     async def cog_load(self) -> None:
         self.scheduler.start()
         self._schedule_daily_question()
+        self._schedule_prefetch_questions()
         await self._hydrate_active_questions()
         LOGGER.info("QuestionCog loaded. Scheduler active.")
 
@@ -75,6 +76,15 @@ class QuestionCog(commands.Cog):
             self._dispatch_daily_questions,
             trigger=trigger,
             id="daily-question",
+            replace_existing=True,
+        )
+
+    def _schedule_prefetch_questions(self) -> None:
+        trigger = CronTrigger(hour="*/2", minute=0, timezone=self.timezone)
+        self.scheduler.add_job(
+            self._prefetch_question,
+            trigger=trigger,
+            id="prefetch-question",
             replace_existing=True,
         )
 
@@ -109,6 +119,24 @@ class QuestionCog(commands.Cog):
                 LOGGER.warning("No suitable channel found for guild %s.", guild.id)
                 continue
             await self.publish_question(channel)
+
+    async def _prefetch_question(self) -> None:
+        """Generate and store a new question every 2 hours without posting."""
+        try:
+            payload = self.client.generate_question()
+            difficulty = payload.difficulty or "Medium"
+            model_name = payload.model_name or "Unknown"
+            db_prompt = f"[Difficulty: {difficulty}][Model: {model_name}] {payload.question}"
+            db.record_question(
+                topic=payload.topic,
+                prompt=db_prompt,
+                options=payload.options,
+                correct_answer=payload.answer,
+                explanation=payload.explanation,
+            )
+            LOGGER.info("Prefetched a new question into the database.")
+        except Exception as exc:  # pragma: no cover - network/db failure
+            LOGGER.warning("Prefetch question failed: %s", exc)
 
     def _auto_select_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
         for channel in guild.text_channels:
@@ -362,7 +390,9 @@ class QuestionCog(commands.Cog):
 
     async def publish_question(self, channel: discord.abc.Messageable, topic: Optional[str] = None) -> None:
         async with self.publish_lock:
-            payload = self.client.generate_question(topic)
+            payload = self._get_unanswered_payload(topic)
+            if payload is None:
+                payload = self.client.generate_question(topic)
             difficulty = payload.difficulty or "Medium"
             model_name = payload.model_name or "Unknown"
             db_prompt = f"[Difficulty: {difficulty}][Model: {model_name}] {payload.question}"
@@ -405,6 +435,33 @@ class QuestionCog(commands.Cog):
                     self.active_views[question_record.id] = view
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
                 db.attach_message_id(question_record.id, message.id)
+
+    def _get_unanswered_payload(self, topic: Optional[str]) -> Optional[QuestionPayload]:
+        """Prefer reusing unanswered stored questions to avoid slow generation."""
+        try:
+            candidates = db.fetch_unanswered_questions(limit=25, topic=topic)
+        except Exception as exc:  # pragma: no cover - db failure
+            LOGGER.warning("Failed to fetch unanswered questions: %s", exc)
+            return None
+
+        if not candidates:
+            return None
+
+        question = random.choice(candidates)
+        meta = self._get_question_metadata(question)
+        difficulty = meta.get("difficulty", "Medium")
+        model_name = meta.get("model", "stored")
+        options = self._extract_options(question)
+
+        return QuestionPayload(
+            topic=question.topic,
+            question=question.prompt,
+            options=options,
+            answer=question.correct_answer,
+            explanation=question.explanation,
+            difficulty=difficulty,
+            model_name=model_name,
+        )
 
     def _build_question_embed(
         self,
