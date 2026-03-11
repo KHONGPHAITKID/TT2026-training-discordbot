@@ -149,6 +149,7 @@ def init_db() -> None:
     Base.metadata.create_all(ENGINE)
     _ensure_answered_count_column()
     _ensure_guild_default_model_column()
+    _backfill_answered_count()
     LOGGER.info("Database initialised at %s", _resolve_database_url())
 
 
@@ -190,6 +191,23 @@ def _ensure_guild_default_model_column() -> None:
             LOGGER.info("Added default_model column to guild_config table")
     except SQLAlchemyError as exc:
         LOGGER.warning("Could not add default_model column: %s", exc)
+
+
+def _backfill_answered_count() -> None:
+    """Populate answered_count from response rows (safe to run repeatedly)."""
+    try:
+        with get_session() as session:
+            rows = (
+                session.query(Response.question_id, func.count(Response.id))
+                .group_by(Response.question_id)
+                .all()
+            )
+            for question_id, count in rows:
+                question = session.get(Question, question_id)
+                if question and question.answered_count != int(count):
+                    question.answered_count = int(count)
+    except SQLAlchemyError as exc:
+        LOGGER.warning("Could not backfill answered_count: %s", exc)
 
 
 @contextmanager
@@ -332,7 +350,12 @@ def fetch_recent_questions(limit: int = 20) -> List[Dict[str, Optional[str]]]:
 def fetch_unanswered_questions(limit: int = 20, topic: Optional[str] = None) -> List[Question]:
     """Return recent unanswered questions (answered_count == 0)."""
     with get_session() as session:
-        query = session.query(Question).filter(Question.answered_count == 0)
+        query = (
+            session.query(Question)
+            .outerjoin(Response, Question.id == Response.question_id)
+            .group_by(Question.id)
+            .having(func.count(Response.id) == 0)
+        )
         if topic:
             query = query.filter(Question.topic == topic)
         questions = query.order_by(func.random()).limit(limit).all()
@@ -344,7 +367,13 @@ def fetch_unanswered_questions(limit: int = 20, topic: Optional[str] = None) -> 
 def count_unanswered_questions() -> int:
     """Return number of unanswered questions (answered_count == 0)."""
     with get_session() as session:
-        return int(session.query(func.count(Question.id)).filter(Question.answered_count == 0).scalar() or 0)
+        return int(
+            session.query(func.count(Question.id))
+            .outerjoin(Response, Question.id == Response.question_id)
+            .group_by(Question.id)
+            .having(func.count(Response.id) == 0)
+            .count()
+        )
 
 
 def count_questions() -> int:
@@ -356,7 +385,13 @@ def count_questions() -> int:
 def count_answered_questions() -> int:
     """Return number of questions that have at least one answer."""
     with get_session() as session:
-        return int(session.query(func.count(Question.id)).filter(Question.answered_count > 0).scalar() or 0)
+        return int(
+            session.query(func.count(Question.id))
+            .outerjoin(Response, Question.id == Response.question_id)
+            .group_by(Question.id)
+            .having(func.count(Response.id) > 0)
+            .count()
+        )
 
 
 def get_question(question_id: int) -> Optional[Question]:
